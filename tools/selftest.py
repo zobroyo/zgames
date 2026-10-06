@@ -117,10 +117,32 @@ def heal_resource(local_url, base, mirror_dir):
         return None
     if not data:
         return None
+    if path.endswith(".json") and data[:3] == b"\xef\xbb\xbf":
+        data = data[3:]
     dest = os.path.join(mirror_dir, "h", host, *path.split("/"))
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     with open(dest, "wb") as fh:
         fh.write(data)
+    # Texture atlases are png+json pairs, but engines request the json only
+    # after the png completes, so a one-shot scan heals the png alone. Fetch
+    # the sibling json here so frame data is never left behind.
+    if path.endswith(".png") and "/atlas" in path.lower():
+        sib_path = path[:-4] + ".json"
+        sib_dest = os.path.join(mirror_dir, "h", host, *sib_path.split("/"))
+        if not os.path.exists(sib_dest):
+            try:
+                sib_remote = "https://%s/%s" % (host, sib_path)
+                sib_req = urllib.request.Request(sib_remote, headers={
+                    "User-Agent": BROWSER_UA, "Referer": REFERER, "Accept": "*/*"})
+                with urllib.request.urlopen(sib_req, timeout=30) as resp:
+                    sib_data = resp.read() if resp.status == 200 else b""
+                if sib_data:
+                    if sib_data[:3] == b"\xef\xbb\xbf":
+                        sib_data = sib_data[3:]
+                    with open(sib_dest, "wb") as fh:
+                        fh.write(sib_data)
+            except Exception:
+                pass
     return len(data)
 
 
