@@ -1,4 +1,4 @@
-# Z Games
+﻿# Z Games
 
 Self-hosted HTML5 game portal for the black box. Every game is mirrored to
 local disk ahead of time and served from this machine only - visitors never
@@ -11,5 +11,5 @@ load anything from third-party sites at runtime.
   `/srv/zgames/mirror` and writes `site/catalog.json`.
 - `deploy/` - systemd units + installer (`zgames.service`, `zgames-mirror.timer`).
 
-Runs on port 8790 behind the Cloudflare tunnel for `games.z-chat.men`.
+Runs on port 8722 behind the Cloudflare tunnel for `game.z-chat.men`.
 See `deploy/README.md` for operations.

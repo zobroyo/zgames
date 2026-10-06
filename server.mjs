@@ -1,4 +1,4 @@
-import http from "node:http";
+﻿import http from "node:http";
 import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -6,13 +6,13 @@ import crypto from "node:crypto";
 
 /* Config */
 
-const PORT = Number(process.env.PORT || 8790);
+const PORT = Number(process.env.PORT || 8722);
 const ROOT = process.env.ROOT || "/srv/zgames/site";
 const MIRROR_DIR = process.env.MIRROR_DIR || "/srv/zgames/mirror";
 const CATALOG = process.env.CATALOG || path.join(ROOT, "catalog.json");
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://dwstivxwyqdogzgxnidm.supabase.co";
 const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "6122c80c-02a1-47fb-9a2f-17dba8403fe1";
-const OAUTH_REDIRECT = process.env.OAUTH_REDIRECT || "https://games.z-chat.men/auth/callback";
+const OAUTH_REDIRECT = process.env.OAUTH_REDIRECT || "https://game.z-chat.men/auth/callback";
 
 let SESSION_SECRET = process.env.SESSION_SECRET || "";
 if (!SESSION_SECRET) {

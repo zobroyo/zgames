@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # Z Games idempotent installer (run as root).
 #
 # Typical layout: the repo is checked out at /srv/zgames/src, so this script
@@ -106,6 +106,6 @@ systemctl start zgames-mirror.timer || echo "    WARNING: zgames-mirror.timer fa
 echo "==> Status"
 printf '  %-24s %s\n' "zgames.service" "$(systemctl is-active zgames.service || true)"
 printf '  %-24s %s\n' "zgames-mirror.timer" "$(systemctl is-active zgames-mirror.timer || true)"
-printf '  healthz http://127.0.0.1:8790/healthz -> %s\n' "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8790/healthz || true)"
+printf '  healthz http://127.0.0.1:8722/healthz -> %s\n' "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8722/healthz || true)"
 
 echo "==> Done."
