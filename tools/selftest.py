@@ -97,10 +97,15 @@ def heal_resource(local_url, base, mirror_dir):
     if not local_url.startswith(prefix):
         return None
     rest = local_url[len(prefix):]
-    host, _, path = rest.partition("/")
-    if not host or not path or ".." in path.split("/"):
+    host, _, raw = rest.partition("/")
+    if not host or not raw or ".." in raw.split("/"):
         return None
-    remote = "https://%s/%s" % (host, path)
+    # Local files are stored without the query string, but the origin may need it.
+    path = raw.split("?", 1)[0].split("#", 1)[0]
+    query = "?" + raw.split("?", 1)[1] if "?" in raw else ""
+    if not path or ".." in path.split("/"):
+        return None
+    remote = "https://%s/%s%s" % (host, path, query)
     req = urllib.request.Request(remote, headers={
         "User-Agent": BROWSER_UA, "Referer": REFERER, "Accept": "*/*"})
     try:
