@@ -618,7 +618,14 @@
 
       frame.title = currentTitle + " \u2014 Z Games";
       frame.addEventListener("load", onLoaded, { once: true });
-      frame.src = src;
+      var go = function () { frame.src = src; };
+      /* wait for stale service-worker cleanup (play.html) so the old worker
+         can never serve a cached broken build to this navigation */
+      if (window.__zgSwCleanup && typeof window.__zgSwCleanup.then === "function") {
+        window.__zgSwCleanup.then(go);
+      } else {
+        go();
+      }
 
       if (modeBadge) {
         modeBadge.textContent = "Playing locally";

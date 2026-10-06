@@ -66,7 +66,18 @@ const mimeFor = (file) => MIME[path.extname(file).toLowerCase()] || "application
 const MIRROR_CSP =
   "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'none'";
 
-const MIRROR_CACHE = "public, max-age=3600";
+const MIRROR_CACHE = "public, max-age=600";
+
+/* No-op service worker served in place of any mirrored game's sw.js. Games
+   that expect a worker can register one (boot flow resolves immediately),
+   but it never caches or intercepts anything - stale C3 offline caches used
+   to keep games broken long after their assets were fixed. */
+const NOOP_SW = `self.addEventListener("install",function(){self.skipWaiting();});
+self.addEventListener("activate",function(e){e.waitUntil((function(){
+var jobs=[(self.caches&&caches.keys)?caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k);}));}):Promise.resolve()];
+try{jobs.push(self.clients.claim());}catch(err){}
+return Promise.all(jobs);
+})());});`;
 
 /* Isolation headers: required for SharedArrayBuffer / threaded WebGL builds
    (many Unity games). Applied to the player page and to mirrored documents. */
@@ -89,18 +100,32 @@ const MIRROR_ASSET_HEADERS = {
 const CG_SHIM = `<script>(function(){
 var noop=function(){};
 var res=function(){return Promise.resolve();};
-var sdk={init:res,game:{loadingStart:noop,loadingStop:noop,gameplayStart:noop,gameplayStop:noop,happytime:noop,sdkLoadingStart:noop,sdkLoadingStop:noop,setGameContext:noop,inviteLink:function(){return"";},getInviteLink:res,showInviteButton:noop},ad:{requestAd:res,requestBanner:res,requestResponsiveBanner:res,hasAdblock:function(){return Promise.resolve(false);}},data:{getItem:function(k){try{return localStorage.getItem("cg_"+k);}catch(e){return null;}},setItem:function(k,v){try{localStorage.setItem("cg_"+k,v);}catch(e){}},removeItem:function(k){try{localStorage.removeItem("cg_"+k);}catch(e){}},clear:noop},user:{isUserAccountAvailable:false,getUser:function(){return Promise.resolve(null);},getToken:function(){return Promise.resolve(null);},showAuthPrompt:res},environment:"crazygames",banner:{requestBanner:res,requestResponsiveBanner:res}};
+var adReq=function(type,callbacks){
+var cb=null;
+if(callbacks&&typeof callbacks==="object"){cb=callbacks;}
+else if(type&&typeof type==="object"){cb=type;}
+try{if(cb&&typeof cb.adStarted==="function"){cb.adStarted();}}catch(e){}
+return Promise.resolve().then(function(){
+try{if(cb&&typeof cb.adFinished==="function"){cb.adFinished();}}catch(e){}
+try{if(cb&&typeof cb.rewardedVideoCompleted==="function"){cb.rewardedVideoCompleted(true);}}catch(e){}
+return {adFinished:true};
+});
+};
+var sdk={init:res,game:{loadingStart:noop,loadingStop:noop,gameplayStart:noop,gameplayStop:noop,happytime:noop,sdkLoadingStart:noop,sdkLoadingStop:noop,setGameContext:noop,inviteLink:function(){return"";},getInviteLink:res,showInviteButton:noop},ad:{requestAd:adReq,requestBanner:adReq,requestResponsiveBanner:adReq,hasAdblock:function(){return Promise.resolve(false);}},data:{getItem:function(k){try{return localStorage.getItem("cg_"+k);}catch(e){return null;}},setItem:function(k,v){try{localStorage.setItem("cg_"+k,v);}catch(e){}},removeItem:function(k){try{localStorage.removeItem("cg_"+k);}catch(e){}},clear:noop},user:{isUserAccountAvailable:false,getUser:function(){return Promise.resolve(null);},getToken:function(){return Promise.resolve(null);},showAuthPrompt:res},environment:"crazygames",banner:{requestBanner:adReq,requestResponsiveBanner:adReq}};
 var facade={};
-try{Object.defineProperty(window,"CrazyGames",{configurable:true,get:function(){return facade;},set:function(v){window.__cgReal=v;}});}catch(e){window.CrazyGames=facade;}
-facade.SDK=new Proxy(sdk,{get:function(t,p){
-if(p==="init"){return function(){try{var r=window.__cgReal;if(r&&r.SDK&&typeof r.SDK.init==="function"){var q=r.SDK.init();if(q&&q.then){q.catch(noop);}}}catch(e){}return Promise.resolve();};}
-if(p==="ad"){return new Proxy({},{get:function(){return res;}});}
-var real=null;try{real=window.__cgReal&&window.__cgReal.SDK?window.__cgReal.SDK[p]:null;}catch(e){}
-if(typeof real!=="undefined"&&real!==null)return real;
+try{Object.defineProperty(window,"CrazyGames",{configurable:true,get:function(){return facade;},set:function(v){window.__cgReal=v;if(v&&v.SDK){window.__cgRealSDK=v.SDK;}}});}catch(e){window.CrazyGames=facade;}
+var sdkProxy=new Proxy(sdk,{get:function(t,p){
+if(p==="init"){return function(){try{var r=window.__cgRealSDK;if(r&&typeof r.init==="function"){var q=r.init();if(q&&q.then){q.catch(noop);}}}catch(e){}return Promise.resolve();};}
+if(p==="ad"){return t.ad;}
+if(p==="banner"){return t.banner;}
+var real=null;try{real=window.__cgRealSDK?window.__cgRealSDK[p]:null;}catch(e){}
+if(typeof real!=="undefined"&&real!==null&&typeof real!=="object"){return real;}
 return t[p]!==undefined?t[p]:noop;
 }});
+try{Object.defineProperty(facade,"SDK",{configurable:true,get:function(){return sdkProxy;},set:function(v){window.__cgRealSDK=v;}});}catch(e){facade.SDK=sdkProxy;}
 if(!window.CrazySDK){window.CrazySDK=sdk;}
 if(!window.CrazySDK.getInstance){try{window.CrazySDK.getInstance=function(){return sdk;};}catch(e){}}
+try{if(window.localStorage&&!localStorage.getItem("zg_swfix1")){if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<rs.length;i++){try{rs[i].unregister();}catch(e){}}}).catch(noop);}if(window.caches&&caches.keys){caches.keys().then(function(ks){for(var i=0;i<ks.length;i++){try{if(ks[i].indexOf("c3offline")===0&&caches.delete){caches.delete(ks[i]);}}catch(e){}}}).catch(noop);}localStorage.setItem("zg_swfix1","1");}}catch(e){}
 })();</script>`;
 
 function injectGameShim(html) {
@@ -134,11 +159,34 @@ async function serveMirrorFile(req, res, file, cacheControl) {
     const html = injectGameShim(data.toString("utf8"));
     return send(req, res, 200, {
       "Content-Type": "text/html; charset=utf-8",
-      "Cache-Control": cacheControl,
+      "Cache-Control": "no-cache",
       ...ISOLATION_HEADERS,
       "Cross-Origin-Resource-Policy": "cross-origin",
       "Content-Security-Policy": MIRROR_CSP,
     }, html);
+  }
+  /* C3 bridge: a poisoned 404 for scripts/c3main.js can sit in a browser cache
+     forever (cached 404), permanently black-screening the game. Serve main.js
+     with a version query on that import so any cached 404 is bypassed. */
+  if (file.endsWith("main.js")) {
+    let data;
+    try {
+      data = await fs.readFile(file);
+    } catch {
+      data = null;
+    }
+    if (data) {
+      const text = data.toString("utf8");
+      if (text.includes('"scripts/c3main.js"')) {
+        const patched = text.replace(/("scripts\/c3main\.js)(")/g, "$1?v=2$2");
+        return send(req, res, 200, {
+          "Content-Type": mimeFor(file),
+          "Cache-Control": "no-cache",
+          ...MIRROR_ASSET_HEADERS,
+          ...ISOLATION_HEADERS,
+        }, patched);
+      }
+    }
   }
   return streamFile(req, res, file, cacheControl, { ...MIRROR_ASSET_HEADERS, ...ISOLATION_HEADERS });
 }
@@ -155,7 +203,7 @@ function send(req, res, status, headers, body) {
 }
 
 function notFound(req, res) {
-  send(req, res, 404, { "Content-Type": "text/plain; charset=utf-8" }, "Not found");
+  send(req, res, 404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }, "Not found");
 }
 
 function forbidden(req, res) {
@@ -577,6 +625,15 @@ async function route(req, res) {
     return handleLogout(req, res);
   }
 
+  if (pathname.endsWith("/sw.js")) {
+    if (!isRead(method)) return methodNotAllowed(req, res);
+    return send(req, res, 200, {
+      "Content-Type": "text/javascript; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Service-Worker-Allowed": "/",
+    }, NOOP_SW);
+  }
+
   if (pathname.startsWith("/mirror/")) {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const target = safeJoin(MIRROR_DIR, pathname.slice("/mirror/".length));
@@ -611,6 +668,16 @@ async function route(req, res) {
 /* Server */
 
 const server = http.createServer((req, res) => {
+  const logPath = req.url || "";
+  const logIt = logPath.startsWith("/mirror/") || logPath.startsWith("/play") ||
+                logPath.endsWith("/sw.js") || logPath === "/healthz";
+  if (logIt) {
+    const t0 = Date.now();
+    const cfip = req.headers["cf-connecting-ip"] || "";
+    res.on("finish", () => {
+      console.log(`[req] ${req.method} ${logPath.slice(0, 140)} -> ${res.statusCode} ${Date.now() - t0}ms${cfip ? " cfip=" + cfip : ""}`);
+    });
+  }
   route(req, res).catch((err) => {
     console.error("[zgames] request failed:", err);
     if (res.headersSent) return res.destroy();

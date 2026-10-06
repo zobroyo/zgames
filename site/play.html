@@ -6,6 +6,34 @@
   <title>Playing &mdash; Z Games</title>
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#07080c">
+  <script>
+  /* Drop any stale mirrored-game service workers + caches before the game
+     iframe navigates: old C3 offline caches could otherwise keep serving a
+     broken build forever. Exposed as a promise so app.js can wait for the
+     cleanup before setting the iframe src (unregister is not instant). */
+  window.__zgSwCleanup = (function () {
+    var jobs = [];
+    try {
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+        jobs.push(navigator.serviceWorker.getRegistrations().then(function (rs) {
+          return Promise.all(rs.map(function (r) {
+            try { return r.unregister(); } catch (e) { return null; }
+          }));
+        }).catch(function () {}));
+      }
+      if (window.caches && caches.keys) {
+        jobs.push(caches.keys().then(function (ks) {
+          return Promise.all(ks.map(function (k) {
+            try { return caches.delete(k); } catch (e) { return null; }
+          }));
+        }).catch(function () {}));
+      }
+    } catch (e) {}
+    var all = Promise.all(jobs);
+    /* never delay the game for more than 5s (unregister can be slow) */
+    return Promise.race([all, new Promise(function (res) { setTimeout(res, 5000); })]);
+  })();
+  </script>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body data-page="play" class="play-body">
