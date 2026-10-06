@@ -3,12 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Z Games</title>
+  <title>Z Games &mdash; play everything, locally</title>
   <meta name="description" content="Z Games — a self-hosted game portal. Every game is mirrored on this server; nothing loads from the internet.">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#07080c">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body data-page="index">
+  <a class="skip-link" href="#library">Skip to games</a>
+
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="/" aria-label="Z Games home">
@@ -24,24 +27,57 @@
         <span class="brand-name">Z GAMES</span>
       </a>
 
+      <div class="header-right">
+        <div id="account" class="account" aria-live="polite"></div>
+      </div>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <div class="toolbar-inner">
       <div class="search-wrap">
         <label class="visually-hidden" for="search">Search games</label>
         <input id="search" class="search-input" type="search" placeholder="Search games&hellip;"
                autocomplete="off" spellcheck="false">
       </div>
 
-      <div class="header-right">
-        <span id="gameCount" class="game-count" aria-live="polite"></span>
-        <div id="account" class="account" aria-live="polite"></div>
+      <div class="sort-wrap">
+        <label class="sort-label" for="sort">Sort</label>
+        <select id="sort" class="sort-select">
+          <option value="recent">Recently added</option>
+          <option value="az">A&ndash;Z</option>
+          <option value="za">Z&ndash;A</option>
+          <option value="random">Random</option>
+        </select>
       </div>
+
+      <span id="gameCount" class="count-chip is-syncing" aria-live="polite">Syncing&hellip;</span>
     </div>
-  </header>
+  </div>
 
   <main class="page">
-    <h1 class="visually-hidden">Game library</h1>
-    <p id="status" class="catalog-status" hidden></p>
-    <section id="grid" class="game-grid" aria-busy="true"></section>
+    <h1 class="visually-hidden">Z Games library</h1>
+
+    <section id="hero" class="hero" aria-labelledby="heroHeading" hidden>
+      <div class="hero-head">
+        <p class="hero-kicker">Fresh on the box</p>
+        <h2 id="heroHeading" class="hero-heading">Recently added</h2>
+      </div>
+      <div id="heroTrack" class="hero-track" aria-label="Featured games"></div>
+    </section>
+
+    <section id="library" class="library" aria-label="All games">
+      <p id="status" class="catalog-status" hidden></p>
+      <div id="grid" class="game-grid" aria-busy="true"></div>
+    </section>
   </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <p class="footer-note">All games are hosted locally on the z-chat box</p>
+      <p class="footer-sub">No CDNs &middot; no trackers &middot; plays offline</p>
+    </div>
+  </footer>
 
   <script src="/app.js" defer></script>
 </body>

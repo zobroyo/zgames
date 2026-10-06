@@ -1,15 +1,19 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="play">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Playing &mdash; Z Games</title>
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#07080c">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body data-page="play" class="play-body">
   <header class="play-bar">
-    <a class="back-link" href="/">&larr; All games</a>
+    <a class="back-link" href="/" aria-label="Back to all games">
+      <span aria-hidden="true">&larr;</span>
+      <span class="back-label">All games</span>
+    </a>
     <h1 id="playTitle" class="play-title">Loading&hellip;</h1>
     <div class="play-actions">
       <button id="fullscreenBtn" class="btn btn-ghost btn-small" type="button">Fullscreen</button>
@@ -22,8 +26,20 @@
       <iframe id="gameFrame" class="game-frame" title="Game"
               allow="autoplay; fullscreen; gamepad; clipboard-read; clipboard-write; encrypted-media"
               allowfullscreen referrerpolicy="no-referrer"></iframe>
+
       <div id="modeBadge" class="mode-badge" hidden></div>
-      <div id="loadHint" class="load-hint" hidden></div>
+
+      <div id="loadOverlay" class="load-overlay" role="status" aria-live="polite">
+        <span class="spinner" aria-hidden="true"></span>
+        <p id="loadText" class="load-text">Loading&hellip;</p>
+        <p id="loadSub" class="load-sub" hidden>Still loading&hellip; this can take a moment.</p>
+      </div>
+
+      <div id="loadError" class="state-panel panel-overlay" hidden>
+        <p class="state-title">Couldn&rsquo;t load the game list</p>
+        <p class="state-sub">The catalog didn&rsquo;t answer. Make sure the server is running, then try again.</p>
+        <button id="retryBtn" class="btn btn-primary" type="button">Retry</button>
+      </div>
     </div>
   </main>
 

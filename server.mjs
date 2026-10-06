@@ -61,6 +61,13 @@ const MIME = {
 
 const mimeFor = (file) => MIME[path.extname(file).toLowerCase()] || "application/octet-stream";
 
+/* CSP applied to all mirrored game content and fallback-served assets:
+   blocks any third-party interaction (external CDNs, crazygames.com, etc.). */
+const MIRROR_CSP =
+  "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'none'";
+
+const MIRROR_CACHE = "public, max-age=3600";
+
 /* Response helpers */
 
 function send(req, res, status, headers, body) {
@@ -151,7 +158,78 @@ function safeJoin(base, rel) {
   return target;
 }
 
-async function streamFile(req, res, file, cacheControl) {
+/* Fallback resolver for mirrored games that request assets with root-absolute
+   paths (e.g. /space-invaders/2/js/main.js). Tries the host named by the
+   Referer first, then any host, staying inside MIRROR_DIR/h/<host>/. */
+
+function refererMirrorHost(req) {
+  const referer = req.headers.referer || req.headers.referrer;
+  if (!referer) return null;
+  let ref;
+  try {
+    ref = new URL(referer);
+  } catch {
+    return null;
+  }
+  if (ref.protocol !== "http:" && ref.protocol !== "https:") return null;
+  const requestHost = String(req.headers.host || "").toLowerCase();
+  if (!requestHost || ref.host.toLowerCase() !== requestHost) return null;
+  const match = /^\/mirror\/h\/([^/]+)(?:\/|$)/.exec(ref.pathname);
+  if (!match) return null;
+  let host = match[1];
+  try {
+    host = decodeURIComponent(host);
+  } catch {
+    /* keep raw value */
+  }
+  if (!host || host === "." || host === ".." || host.includes("/") || host.includes("\\")) return null;
+  return host;
+}
+
+async function resolveMirrorAsset(req, pathname) {
+  if (!pathname.startsWith("/") || pathname.startsWith("//")) return null;
+  const rel = pathname.slice(1);
+  if (!rel || rel.includes("\\")) return null;
+  const segments = rel.split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return null;
+
+  const hostsDir = path.join(MIRROR_DIR, "h");
+
+  const host = refererMirrorHost(req);
+  if (host) {
+    const target = safeJoin(hostsDir, `${host}/${rel}`);
+    if (target) {
+      try {
+        const stat = await fs.stat(target);
+        if (stat.isFile()) return target;
+      } catch {
+        /* fall through to cross-host search */
+      }
+    }
+  }
+
+  let entries;
+  try {
+    entries = await fs.readdir(hostsDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const target = safeJoin(hostsDir, `${entry.name}/${rel}`);
+    if (!target) continue;
+    try {
+      const stat = await fs.stat(target);
+      if (stat.isFile()) return target;
+    } catch {
+      /* try next host */
+    }
+  }
+  return null;
+}
+
+async function streamFile(req, res, file, cacheControl, extraHeaders) {
   let stat;
   try {
     stat = await fs.stat(file);
@@ -165,6 +243,7 @@ async function streamFile(req, res, file, cacheControl) {
     "Cache-Control": cacheControl,
     "Last-Modified": stat.mtime.toUTCString(),
     "X-Content-Type-Options": "nosniff",
+    ...(extraHeaders || {}),
   });
   if (req.method === "HEAD") return res.end();
   const stream = createReadStream(file);
@@ -427,7 +506,7 @@ async function route(req, res) {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const target = safeJoin(MIRROR_DIR, pathname.slice("/mirror/".length));
     if (!target) return forbidden(req, res);
-    return streamFile(req, res, target, "public, max-age=3600");
+    return streamFile(req, res, target, MIRROR_CACHE, { "Content-Security-Policy": MIRROR_CSP });
   }
 
   if (pathname.startsWith("/covers/")) {
@@ -441,6 +520,13 @@ async function route(req, res) {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const file = pathname === "/" ? path.join(ROOT, "index.html") : path.join(ROOT, pathname.slice(1));
     return sendFile(req, res, file, "no-cache");
+  }
+
+  /* Fallback: root-absolute asset requests from mirrored games. Runs last, so
+     /api, /auth, /mirror, /covers, /healthz, /play and static files win. */
+  if (isRead(method)) {
+    const asset = await resolveMirrorAsset(req, pathname);
+    if (asset) return streamFile(req, res, asset, MIRROR_CACHE, { "Content-Security-Policy": MIRROR_CSP });
   }
 
   return notFound(req, res);

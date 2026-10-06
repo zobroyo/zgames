@@ -6,17 +6,20 @@
  *   node tools/mirror.mjs [options]
  *
  * Options (env fallbacks in brackets):
- *   --limit N        [LIMIT]        max games attempted this run       (default 250)
- *   --concurrency N  [CONCURRENCY]  parallel downloads per game        (default 6)
- *   --out DIR        [OUT]          game files root                    (default /srv/zgames/mirror)
- *   --site DIR       [SITE]         catalog.json + covers/             (default /srv/zgames/site)
- *   --only SLUG      [ONLY]         mirror just this one game
- *   --force          [FORCE=1]      re-mirror games already ok/partial
+ *   --limit N              [LIMIT]            max games attempted this run      (default 250)
+ *   --concurrency N        [CONCURRENCY]      parallel downloads per game       (default 12)
+ *   --game-concurrency N   [GAME_CONCURRENCY] games mirrored in parallel        (default 3)
+ *   --covers-only          [COVERS_ONLY=1]    backfill missing covers only, nothing else
+ *   --out DIR              [OUT]              game files root                   (default /srv/zgames/mirror)
+ *   --site DIR             [SITE]             catalog.json + covers/            (default /srv/zgames/site)
+ *   --only SLUG            [ONLY]             mirror just this one game
+ *   --force                [FORCE=1]          re-mirror games already ok/partial
  *
- * Catalog source : https://www.crazygames.com/sitemap
+ * Catalog source : https://www.crazygames.com/sitemap (processed newest-first)
  * Wrapper page   : https://games.crazygames.com/en_US/<slug>/index.html
  * Build files    : <sub>.game-files.crazygames.com (URL found in wrapper loaderOptions)
  * Covers         : https://imgs.crazygames.com/auto-covers/<slug>_1x1.png?...
+ *                  fallback: og:image / twitter:image on https://www.crazygames.com/game/<slug>
  *
  * Mirror layout  : OUT/h/<hostname>/<url path>
  * Mirrored text files have allowed-host absolute/protocol-relative URLs rewritten
@@ -48,6 +51,8 @@ const MAX_GAME_BYTES = 150 * 1024 * 1024;
 const MAX_FILE_BYTES = 40 * 1024 * 1024;
 const INDEX_MIN_BYTES = 500;
 const COVER_WIDTH = 600;
+const GAME_POLITENESS_MS = 50;
+const COVERS_ONLY_CONCURRENCY = 4;
 
 const TEXT_EXTS = new Set([
   ".html", ".js", ".css", ".json", ".xml", ".svg", ".txt", ".atlas", ".plist", ".map",
@@ -83,11 +88,20 @@ function intOption(envName, cliName, fallback) {
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 }
 
+function boolOption(envName, cliName) {
+  return (
+    argv.includes(cliName || `--${envName.toLowerCase().replace(/_/g, "-")}`) ||
+    /^(1|true|yes)$/i.test(String(process.env[envName] || ""))
+  );
+}
+
 const LIMIT = intOption("LIMIT", "--limit", 250);
-const CONCURRENCY = intOption("CONCURRENCY", "--concurrency", 6);
+const CONCURRENCY = intOption("CONCURRENCY", "--concurrency", 12);
+const GAME_CONCURRENCY = intOption("GAME_CONCURRENCY", "--game-concurrency", 3);
 const OUT_DIR = path.resolve(String(pick("OUT", "--out", "/srv/zgames/mirror")));
 const SITE_DIR = path.resolve(String(pick("SITE", "--site", "/srv/zgames/site")));
 const ONLY = String(pick("ONLY", "--only", "") || "").trim() || null;
+const COVERS_ONLY = boolOption("COVERS_ONLY", "--covers-only");
 const FORCE = argv.includes("--force") || /^(1|true|yes)$/i.test(String(process.env.FORCE || ""));
 
 const CATALOG_PATH = path.join(SITE_DIR, "catalog.json");
@@ -102,15 +116,6 @@ let interrupted = false;
 let catalog = { generatedAt: new Date().toISOString(), source: CATALOG_SOURCE, games: [] };
 let writeChain = Promise.resolve();
 let writeSeq = 0;
-
-// Per-game crawl state (reset for every game).
-let queue = [];
-let seen = new Set();
-let writtenPaths = new Set();
-let files = 0;
-let bytes = 0;
-let truncated = false;
-let failureCount = 0;
 
 const stats = { ok: 0, partial: 0, unavailable: 0, files: 0, bytes: 0 };
 
@@ -166,8 +171,13 @@ function rewriteText(text, opts = {}) {
   if (html && host) {
     output = output.replace(
       /((?:src|href)\s*=\s*)(?:"(\/(?!\/)[^"]*)"|'(\/(?!\/)[^']*)')/gi,
-      (match, attr, dq, sq) =>
-        `${attr}"${MIRROR_PREFIX}/${MIRROR_DIR}/${host}${dq !== undefined ? dq : sq}"`
+      (match, attr, dq, sq) => {
+        const value = dq !== undefined ? dq : sq;
+        // Never re-prefix URLs that the host rewrite above already localized
+        // (this used to produce /mirror/h/<host>/mirror/h/... doubled paths).
+        if (value.startsWith(`${MIRROR_PREFIX}/`)) return match;
+        return `${attr}"${MIRROR_PREFIX}/${MIRROR_DIR}/${host}${value}"`;
+      }
     );
   }
   return output;
@@ -275,7 +285,12 @@ async function fetchOnce(url) {
     signal,
   });
   const buffer = Buffer.from(await response.arrayBuffer());
-  return { status: response.status, size: buffer.length, buffer };
+  return {
+    status: response.status,
+    size: buffer.length,
+    contentType: response.headers.get("content-type") || "",
+    buffer,
+  };
 }
 
 /** One retry on network errors, 5xx and 429. 404 comes back untouched. */
@@ -298,13 +313,6 @@ async function fetchWithRetry(url) {
   throw lastError;
 }
 
-function enqueue(url) {
-  if (!seen.has(url)) {
-    seen.add(url);
-    queue.push(url);
-  }
-}
-
 /** Write a fetched text document (rewritten) to its local path. */
 async function writeTextFile(url, text) {
   const dest = localPathFor(url);
@@ -318,6 +326,21 @@ async function writeTextFile(url, text) {
 }
 
 /* ------------------------------------------------------------- catalog I/O */
+
+/**
+ * Async mutex over load-modify-save of the shared catalog, so concurrent games
+ * can never clobber each other's entries. The promise chain serializes callers.
+ */
+let catalogChain = Promise.resolve();
+
+function withCatalogLock(task) {
+  const run = catalogChain.then(task, task);
+  catalogChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
 
 async function loadCatalog() {
   try {
@@ -355,40 +378,54 @@ function writeCatalog() {
 
 /* --------------------------------------------------------------- crawling */
 
-async function processUrl(url) {
-  if (interrupted || truncated) return;
-  if (files >= MAX_FILES_PER_GAME) {
-    truncated = true;
+/** Fresh per-game download state so games can run concurrently. */
+function createGameContext(label) {
+  return {
+    label,
+    queue: [],
+    seen: new Set(),
+    writtenPaths: new Set(),
+    files: 0,
+    bytes: 0,
+    truncated: false,
+    failureCount: 0,
+  };
+}
+
+async function processUrl(ctx, url) {
+  if (interrupted || ctx.truncated) return;
+  if (ctx.files >= MAX_FILES_PER_GAME) {
+    ctx.truncated = true;
     return;
   }
-  if (bytes >= MAX_GAME_BYTES) {
-    truncated = true;
+  if (ctx.bytes >= MAX_GAME_BYTES) {
+    ctx.truncated = true;
     return;
   }
 
   const dest = localPathFor(url);
   if (!dest) return;
-  if (writtenPaths.has(dest)) return; // same file via a different query string: keep first
-  writtenPaths.add(dest); // claim now so concurrent query variants cannot double-write/double-count
+  if (ctx.writtenPaths.has(dest)) return; // same file via a different query string: keep first
+  ctx.writtenPaths.add(dest); // claim now so concurrent query variants cannot double-write/double-count
 
   let result;
   try {
     result = await fetchWithRetry(url);
   } catch (error) {
     if (signal.aborted) return;
-    failureCount++;
-    console.error(`[mirror]   failed ${url}: ${error.message}`);
+    ctx.failureCount++;
+    console.error(`[mirror]   [${ctx.label}] failed ${url}: ${error.message}`);
     return;
   }
 
   if (result.status === 403 || result.status === 404) return; // blocked/gone reference: skip silently
   if (result.status !== 200) {
-    failureCount++;
-    console.error(`[mirror]   ${result.status} ${url}`);
+    ctx.failureCount++;
+    console.error(`[mirror]   [${ctx.label}] ${result.status} ${url}`);
     return;
   }
   if (result.size > MAX_FILE_BYTES) {
-    truncated = true; // single file too big: skip, game becomes partial
+    ctx.truncated = true; // single file too big: skip, game becomes partial
     return;
   }
 
@@ -399,24 +436,31 @@ async function processUrl(url) {
     ? Buffer.from(rewriteText(text, { html: extOf(url) === ".html", host }), "utf8")
     : result.buffer;
 
-  if (bytes + output.length > MAX_GAME_BYTES) {
-    truncated = true;
+  if (ctx.bytes + output.length > MAX_GAME_BYTES) {
+    ctx.truncated = true;
     return;
   }
 
   await fs.mkdir(path.dirname(dest), { recursive: true });
   await fs.writeFile(dest, output);
-  files++;
-  bytes += output.length;
+  ctx.files++;
+  ctx.bytes += output.length;
 
   if (isText) {
-    for (const next of discoverUrls(text, url)) enqueue(next);
+    for (const next of discoverUrls(text, url)) enqueue(ctx, next);
+  }
+}
+
+function enqueue(ctx, url) {
+  if (!ctx.seen.has(url)) {
+    ctx.seen.add(url);
+    ctx.queue.push(url);
   }
 }
 
 /** Run the per-game download pool to completion (new URLs keep feeding in). */
-async function runQueue() {
-  if (queue.length === 0) return;
+async function runQueue(ctx) {
+  if (ctx.queue.length === 0) return;
   let active = 0;
   await new Promise((resolve) => {
     const pump = () => {
@@ -424,16 +468,16 @@ async function runQueue() {
         if (active === 0) resolve();
         return;
       }
-      while (active < CONCURRENCY && queue.length > 0) {
-        const url = queue.shift();
+      while (active < CONCURRENCY && ctx.queue.length > 0) {
+        const url = ctx.queue.shift();
         active++;
-        processUrl(url)
+        processUrl(ctx, url)
           .catch((error) => {
-            if (!signal.aborted) console.error(`[mirror]   error ${url}: ${error.message}`);
+            if (!signal.aborted) console.error(`[mirror]   [${ctx.label}] error ${url}: ${error.message}`);
           })
           .finally(() => {
             active--;
-            if (queue.length > 0 || active > 0) pump();
+            if (ctx.queue.length > 0 || active > 0) pump();
             else resolve();
           });
       }
@@ -442,19 +486,85 @@ async function runQueue() {
   });
 }
 
+/* ----------------------------------------------------------------- covers */
+
+function coverFilePath(slug) {
+  return path.join(COVERS_DIR, `${slug}.png`);
+}
+
+/** Fetch a URL and return its bytes only when it is a 200 image/* response. */
+async function fetchImageBuffer(url) {
+  let result;
+  try {
+    result = await fetchWithRetry(url);
+  } catch {
+    return null;
+  }
+  if (!result || result.status !== 200 || result.size === 0) return null;
+  const type = String(result.contentType || "").toLowerCase();
+  if (!type.startsWith("image/")) return null;
+  return result.buffer;
+}
+
+/** og:image (preferred) or twitter:image from a CrazyGames game page. */
+function findMetaImage(html) {
+  const metas = html.match(/<meta\b[^>]*>/gi) || [];
+  const pick = (key) => {
+    const re = new RegExp(`(?:property|name)\\s*=\\s*["']${key}["']`, "i");
+    for (const tag of metas) {
+      if (!re.test(tag)) continue;
+      const content = tag.match(/content\s*=\s*["']([^"']+)["']/i);
+      if (content && content[1].trim()) return decodeEntities(content[1].trim());
+    }
+    return null;
+  };
+  return pick("og:image") || pick("twitter:image");
+}
+
+/**
+ * Best-effort cover download. Tries the auto-cover CDN first, then og:image /
+ * twitter:image parsed from the game page. Returns true when a cover was saved.
+ * Never throws: a cover must never fail a game.
+ */
 async function downloadCover(slug) {
-  const coverUrl =
+  const autoCover =
     `https://imgs.crazygames.com/auto-covers/${slug}_1x1.png` +
     `?format=auto&quality=80&metadata=none&width=${COVER_WIDTH}`;
+  let buffer = await fetchImageBuffer(autoCover);
+
+  if (!buffer) {
+    const pageUrl = `${CATALOG_SOURCE}game/${slug}`;
+    try {
+      const page = await fetchWithRetry(pageUrl);
+      if (page && page.status === 200 && page.size > 0) {
+        const imageUrl = findMetaImage(page.buffer.toString("utf8"));
+        if (imageUrl) {
+          let resolved = null;
+          try {
+            resolved = new URL(imageUrl, pageUrl).href;
+          } catch {
+            resolved = null;
+          }
+          if (resolved) buffer = await fetchImageBuffer(resolved);
+        }
+      }
+    } catch {
+      // page unavailable: cover stays best effort
+    }
+  }
+
+  if (!buffer) return false;
   try {
-    const result = await fetchWithRetry(coverUrl);
-    if (result.status !== 200 || result.size === 0) return;
     await fs.mkdir(COVERS_DIR, { recursive: true });
-    await fs.writeFile(path.join(COVERS_DIR, `${slug}.png`), result.buffer);
-  } catch {
-    // cover is best effort
+    await fs.writeFile(coverFilePath(slug), buffer);
+    return true;
+  } catch (error) {
+    console.error(`[mirror] cover write failed for ${slug}: ${error.message}`);
+    return false;
   }
 }
+
+/* ----------------------------------------------------------------- wrapper */
 
 /** First build index URL found in the wrapper's loaderOptions JSON. */
 function extractBuildUrl(html) {
@@ -476,7 +586,7 @@ function extractBuildUrl(html) {
 }
 
 /** Mirror one game. Returns a catalog entry, or null if SIGINT interrupted us. */
-async function mirrorGame(slug) {
+async function mirrorGame(slug, ctx) {
   const wrapperUrl = `${HOST_PREFIX}/en_US/${slug}/index.html`;
   const entry = {
     slug,
@@ -487,14 +597,6 @@ async function mirrorGame(slug) {
     bytes: 0,
     updatedAt: new Date().toISOString(),
   };
-
-  queue = [];
-  seen = new Set();
-  writtenPaths = new Set();
-  files = 0;
-  bytes = 0;
-  truncated = false;
-  failureCount = 0;
 
   if (interrupted) return null;
 
@@ -515,15 +617,15 @@ async function mirrorGame(slug) {
 
   const savedWrapper = await writeTextFile(wrapperUrl, wrapperHtml);
   if (savedWrapper) {
-    files++;
-    bytes += savedWrapper.size;
-    writtenPaths.add(savedWrapper.dest);
+    ctx.files++;
+    ctx.bytes += savedWrapper.size;
+    ctx.writtenPaths.add(savedWrapper.dest);
   }
 
   const buildUrl = extractBuildUrl(wrapperHtml);
   if (!buildUrl) {
-    entry.files = files;
-    entry.bytes = bytes;
+    entry.files = ctx.files;
+    entry.bytes = ctx.bytes;
     await downloadCover(slug);
     return entry; // no playable build advertised
   }
@@ -536,9 +638,9 @@ async function mirrorGame(slug) {
   }
 
   if (!build || build.status !== 200 || build.size === 0) {
-    console.error(`[mirror]   build unavailable ${buildUrl}${build ? ` (HTTP ${build.status})` : ""}`);
-    entry.files = files;
-    entry.bytes = bytes;
+    console.error(`[mirror] [${slug}] build unavailable ${buildUrl}${build ? ` (HTTP ${build.status})` : ""}`);
+    entry.files = ctx.files;
+    entry.bytes = ctx.bytes;
     await downloadCover(slug);
     return entry; // entry build URL failed -> unavailable
   }
@@ -551,21 +653,21 @@ async function mirrorGame(slug) {
     await downloadCover(slug);
     return entry;
   }
-  files++;
-  bytes += savedBuild.size;
-  writtenPaths.add(savedBuild.dest);
+  ctx.files++;
+  ctx.bytes += savedBuild.size;
+  ctx.writtenPaths.add(savedBuild.dest);
   entry.entry = mirrorPathFor(savedBuild.dest);
   entry.status = "ok";
 
-  for (const next of discoverUrls(buildHtml, buildUrl)) enqueue(next);
+  for (const next of discoverUrls(buildHtml, buildUrl)) enqueue(ctx, next);
 
-  await runQueue();
+  await runQueue(ctx);
 
   if (signal.aborted) return null;
 
-  entry.files = files;
-  entry.bytes = bytes;
-  entry.status = truncated || failureCount > 0 ? "partial" : "ok";
+  entry.files = ctx.files;
+  entry.bytes = ctx.bytes;
+  entry.status = ctx.truncated || ctx.failureCount > 0 ? "partial" : "ok";
 
   await downloadCover(slug);
   return entry;
@@ -619,9 +721,9 @@ const SEED_PAGES = [
 
 /**
  * Slugs from the live homepage + category pages. These are currently published
- * and popular games, so they mirror far more reliably than sitemap order (which
- * starts with years-old entries whose builds are gone). Tried before the
- * sitemap so `--limit` reaches playable games first.
+ * and popular games, so they mirror far more reliably than sitemap order (whose
+ * oldest entries no longer have builds). Tried before the sitemap so `--limit`
+ * reaches playable games first.
  */
 async function fetchSeedSlugs() {
   const slugs = [];
@@ -677,16 +779,78 @@ async function fetchSitemapSlugs() {
   return slugs;
 }
 
+/* ------------------------------------------------------------- covers-only */
+
+/** Backfill covers for catalog entries whose cover file is missing. */
+async function runCoversOnly() {
+  const candidates = ONLY
+    ? [ONLY]
+    : catalog.games.map((game) => game.slug).filter((slug) => typeof slug === "string" && slug);
+
+  const missing = [];
+  for (const slug of candidates) {
+    try {
+      const info = await fs.stat(coverFilePath(slug));
+      if (info.isFile() && info.size > 0) continue;
+    } catch {
+      // missing: backfill below
+    }
+    missing.push(slug);
+  }
+
+  console.log(
+    `[mirror] covers-only: ${catalog.games.length} catalog entries, ${missing.length} missing covers`
+  );
+
+  let cursor = 0;
+  let done = 0;
+  let downloaded = 0;
+  let failed = 0;
+
+  const worker = async () => {
+    while (!interrupted) {
+      const index = cursor++;
+      if (index >= missing.length) return;
+      const slug = missing[index];
+      const ok = await downloadCover(slug);
+      done++;
+      if (ok) {
+        downloaded++;
+        console.log(`[cover] ${slug} saved`);
+      } else {
+        failed++;
+        console.error(`[cover] ${slug} not found`);
+      }
+      if (interrupted) return;
+      await sleep(GAME_POLITENESS_MS);
+    }
+  };
+
+  const workers = Math.max(1, Math.min(COVERS_ONLY_CONCURRENCY, missing.length || 1));
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+
+  console.log(
+    `[mirror] covers-only summary: missing=${missing.length} done=${done}` +
+      ` downloaded=${downloaded} failed=${failed}`
+  );
+}
+
 /* -------------------------------------------------------------------- main */
 
 async function main() {
   console.log(
     `[mirror] out=${OUT_DIR} site=${SITE_DIR} limit=${LIMIT} concurrency=${CONCURRENCY}` +
-      `${ONLY ? ` only=${ONLY}` : ""}${FORCE ? " force" : ""}`
+      ` gameConcurrency=${GAME_CONCURRENCY}${ONLY ? ` only=${ONLY}` : ""}` +
+      `${COVERS_ONLY ? " covers-only" : ""}${FORCE ? " force" : ""}`
   );
 
   await fs.mkdir(SITE_DIR, { recursive: true });
   await loadCatalog();
+
+  if (COVERS_ONLY) {
+    await runCoversOnly();
+    return;
+  }
 
   const bySlug = new Map(catalog.games.map((game, index) => [game.slug, index]));
 
@@ -697,50 +861,78 @@ async function main() {
     console.log(`[mirror] fetching ${SITEMAP_URL}`);
     const sitemapSlugs = await fetchSitemapSlugs();
     console.log(`[mirror] sitemap: ${sitemapSlugs.length} games (deduped, document order)`);
+    const newestFirst = [...sitemapSlugs].reverse();
+    console.log(`[mirror] order: sitemap reversed (newest first)`);
     console.log(`[mirror] fetching popular game lists`);
     const seedSlugs = await fetchSeedSlugs();
     console.log(`[mirror] popular: ${seedSlugs.length} slugs (tried first)`);
-    slugs = [...new Set([...seedSlugs, ...sitemapSlugs])];
+    slugs = [...new Set([...seedSlugs, ...newestFirst])];
+    console.log(
+      `[mirror] order: ${seedSlugs.length} popular + ${newestFirst.length} sitemap(newest-first)` +
+        ` -> ${slugs.length} unique slugs`
+    );
   }
 
+  let cursor = 0;
+  let claimed = 0;
   let attempted = 0;
   let lastStatus = null;
 
-  for (const slug of slugs) {
-    if (interrupted) break;
-    if (attempted >= LIMIT) break;
-
-    const existingIndex = bySlug.has(slug) ? bySlug.get(slug) : -1;
-    const existing = existingIndex >= 0 ? catalog.games[existingIndex] : null;
-    const alreadyMirrored =
-      existing &&
-      (existing.status === "ok" || existing.status === "partial") &&
-      typeof existing.entry === "string" &&
-      existing.entry.length > 0;
-    if (!ONLY && !FORCE && alreadyMirrored) {
-      continue; // already mirrored with a playable entry: do not count toward --limit
+  const claimNext = () => {
+    while (cursor < slugs.length) {
+      const slug = slugs[cursor++];
+      const existingIndex = bySlug.has(slug) ? bySlug.get(slug) : -1;
+      const existing = existingIndex >= 0 ? catalog.games[existingIndex] : null;
+      const alreadyMirrored =
+        existing &&
+        (existing.status === "ok" || existing.status === "partial") &&
+        typeof existing.entry === "string" &&
+        existing.entry.length > 0;
+      if (!ONLY && !FORCE && alreadyMirrored) {
+        continue; // already mirrored with a playable entry: do not count toward --limit
+      }
+      if (claimed >= LIMIT) return null;
+      claimed++;
+      return slug;
     }
+    return null;
+  };
 
-    const entry = await mirrorGame(slug);
-    if (!entry) break; // interrupted
+  const worker = async () => {
+    while (!interrupted) {
+      const slug = claimNext();
+      if (!slug) return;
 
-    if (existingIndex >= 0) catalog.games[existingIndex] = entry;
-    else {
-      bySlug.set(slug, catalog.games.length);
-      catalog.games.push(entry);
+      const ctx = createGameContext(slug);
+      const entry = await mirrorGame(slug, ctx);
+      if (!entry) return; // interrupted
+
+      // Serialize catalog mutation + save so concurrent games never clobber each other.
+      await withCatalogLock(async () => {
+        const existingIndex = bySlug.has(slug) ? bySlug.get(slug) : -1;
+        if (existingIndex >= 0) catalog.games[existingIndex] = entry;
+        else {
+          bySlug.set(slug, catalog.games.length);
+          catalog.games.push(entry);
+        }
+        await writeCatalog();
+
+        attempted++;
+        stats[entry.status]++;
+        stats.files += entry.files;
+        stats.bytes += entry.bytes;
+        lastStatus = entry.status;
+      });
+
+      console.log(`[${entry.status}] ${slug} files=${entry.files} bytes=${entry.bytes}`);
+
+      if (interrupted) return;
+      await sleep(GAME_POLITENESS_MS); // politeness between games
     }
-    await writeCatalog();
+  };
 
-    attempted++;
-    stats[entry.status]++;
-    stats.files += entry.files;
-    stats.bytes += entry.bytes;
-    lastStatus = entry.status;
-    console.log(`[${entry.status}] ${slug} files=${entry.files} bytes=${entry.bytes}`);
-
-    if (interrupted || attempted >= LIMIT) break;
-    await sleep(150 + Math.floor(Math.random() * 101)); // politeness: 150-250ms between games
-  }
+  const workers = Math.max(1, Math.min(GAME_CONCURRENCY, LIMIT));
+  await Promise.all(Array.from({ length: workers }, () => worker()));
 
   console.log(
     `[mirror] summary: attempted=${attempted} ok=${stats.ok} partial=${stats.partial}` +
