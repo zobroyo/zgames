@@ -68,6 +68,81 @@ const MIRROR_CSP =
 
 const MIRROR_CACHE = "public, max-age=3600";
 
+/* Isolation headers: required for SharedArrayBuffer / threaded WebGL builds
+   (many Unity games). Applied to the player page and to mirrored documents. */
+const ISOLATION_HEADERS = {
+  "Cross-Origin-Opener-Policy": "same-origin",
+  "Cross-Origin-Embedder-Policy": "require-corp",
+};
+
+/* Mirrored assets must opt in to being loaded from the isolated documents. */
+const MIRROR_ASSET_HEADERS = {
+  "Content-Security-Policy": MIRROR_CSP,
+  "Cross-Origin-Resource-Policy": "cross-origin",
+};
+
+/* CrazyGames SDK shim, injected as the first thing in every mirrored document.
+   Games that wait on the portal SDK (init handshake, ads, lifecycle) would
+   otherwise never start - the real init waits for a portal parent that does
+   not exist here. The real SDK is still allowed to install itself; only the
+   calls that block startup (init/ads) are made to resolve immediately. */
+const CG_SHIM = `<script>(function(){
+var noop=function(){};
+var res=function(){return Promise.resolve();};
+var sdk={init:res,game:{loadingStart:noop,loadingStop:noop,gameplayStart:noop,gameplayStop:noop,happytime:noop,sdkLoadingStart:noop,sdkLoadingStop:noop,setGameContext:noop,inviteLink:function(){return"";},getInviteLink:res,showInviteButton:noop},ad:{requestAd:res,requestBanner:res,requestResponsiveBanner:res,hasAdblock:function(){return Promise.resolve(false);}},data:{getItem:function(k){try{return localStorage.getItem("cg_"+k);}catch(e){return null;}},setItem:function(k,v){try{localStorage.setItem("cg_"+k,v);}catch(e){}},removeItem:function(k){try{localStorage.removeItem("cg_"+k);}catch(e){}},clear:noop},user:{isUserAccountAvailable:false,getUser:function(){return Promise.resolve(null);},getToken:function(){return Promise.resolve(null);},showAuthPrompt:res},environment:"crazygames",banner:{requestBanner:res,requestResponsiveBanner:res}};
+var facade={};
+try{Object.defineProperty(window,"CrazyGames",{configurable:true,get:function(){return facade;},set:function(v){window.__cgReal=v;}});}catch(e){window.CrazyGames=facade;}
+facade.SDK=new Proxy(sdk,{get:function(t,p){
+if(p==="init"){return function(){try{var r=window.__cgReal;if(r&&r.SDK&&typeof r.SDK.init==="function"){var q=r.SDK.init();if(q&&q.then){q.catch(noop);}}}catch(e){}return Promise.resolve();};}
+if(p==="ad"){return new Proxy({},{get:function(){return res;}});}
+var real=null;try{real=window.__cgReal&&window.__cgReal.SDK?window.__cgReal.SDK[p]:null;}catch(e){}
+if(typeof real!=="undefined"&&real!==null)return real;
+return t[p]!==undefined?t[p]:noop;
+}});
+if(!window.CrazySDK){window.CrazySDK=sdk;}
+if(!window.CrazySDK.getInstance){try{window.CrazySDK.getInstance=function(){return sdk;};}catch(e){}}
+})();</script>`;
+
+function injectGameShim(html) {
+  const head = /<head[^>]*>/i.exec(html);
+  if (head) {
+    const at = head.index + head[0].length;
+    return html.slice(0, at) + CG_SHIM + html.slice(at);
+  }
+  const root = /<html[^>]*>/i.exec(html);
+  if (root) {
+    const at = root.index + root[0].length;
+    return html.slice(0, at) + CG_SHIM + html.slice(at);
+  }
+  return CG_SHIM + html;
+}
+
+/* Serve a mirrored game file: HTML documents get the SDK shim + isolation
+   headers and are sent whole; everything else streams. */
+async function serveMirrorFile(req, res, file, cacheControl) {
+  if (file.toLowerCase().endsWith(".html") && req.method !== "HEAD") {
+    let data;
+    try {
+      data = await fs.readFile(file);
+    } catch (err) {
+      if (err.code === "ENOENT" || err.code === "EISDIR") return notFound(req, res);
+      throw err;
+    }
+    if (data.length > 4 * 1024 * 1024) {
+      return streamFile(req, res, file, cacheControl, { ...MIRROR_ASSET_HEADERS, ...ISOLATION_HEADERS });
+    }
+    const html = injectGameShim(data.toString("utf8"));
+    return send(req, res, 200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": cacheControl,
+      ...ISOLATION_HEADERS,
+      "Cross-Origin-Resource-Policy": "cross-origin",
+      "Content-Security-Policy": MIRROR_CSP,
+    }, html);
+  }
+  return streamFile(req, res, file, cacheControl, { ...MIRROR_ASSET_HEADERS, ...ISOLATION_HEADERS });
+}
+
 /* Response helpers */
 
 function send(req, res, status, headers, body) {
@@ -254,7 +329,7 @@ async function streamFile(req, res, file, cacheControl, extraHeaders) {
   stream.pipe(res);
 }
 
-async function sendFile(req, res, file, cacheControl) {
+async function sendFile(req, res, file, cacheControl, extraHeaders) {
   let data;
   try {
     data = await fs.readFile(file);
@@ -262,7 +337,7 @@ async function sendFile(req, res, file, cacheControl) {
     if (err.code === "ENOENT" || err.code === "EISDIR") return notFound(req, res);
     throw err;
   }
-  send(req, res, 200, { "Content-Type": mimeFor(file), "Cache-Control": cacheControl }, data);
+  send(req, res, 200, { "Content-Type": mimeFor(file), "Cache-Control": cacheControl, ...(extraHeaders || {}) }, data);
 }
 
 /* Auth routes */
@@ -506,7 +581,7 @@ async function route(req, res) {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const target = safeJoin(MIRROR_DIR, pathname.slice("/mirror/".length));
     if (!target) return forbidden(req, res);
-    return streamFile(req, res, target, MIRROR_CACHE, { "Content-Security-Policy": MIRROR_CSP });
+    return serveMirrorFile(req, res, target, MIRROR_CACHE);
   }
 
   if (pathname.startsWith("/covers/")) {
@@ -516,17 +591,18 @@ async function route(req, res) {
     return streamFile(req, res, target, "public, max-age=3600");
   }
 
-  if (pathname === "/" || pathname === "/styles.css" || pathname === "/app.js" || pathname === "/play.html") {
+  if (pathname === "/" || pathname === "/styles.css" || pathname === "/app.js" || pathname === "/play.html" || pathname === "/index.html") {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const file = pathname === "/" ? path.join(ROOT, "index.html") : path.join(ROOT, pathname.slice(1));
-    return sendFile(req, res, file, "no-cache");
+    const isolate = file.endsWith(".html") ? ISOLATION_HEADERS : undefined;
+    return sendFile(req, res, file, "no-cache", isolate);
   }
 
   /* Fallback: root-absolute asset requests from mirrored games. Runs last, so
      /api, /auth, /mirror, /covers, /healthz, /play and static files win. */
   if (isRead(method)) {
     const asset = await resolveMirrorAsset(req, pathname);
-    if (asset) return streamFile(req, res, asset, MIRROR_CACHE, { "Content-Security-Policy": MIRROR_CSP });
+    if (asset) return serveMirrorFile(req, res, asset, MIRROR_CACHE);
   }
 
   return notFound(req, res);

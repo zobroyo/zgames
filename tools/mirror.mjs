@@ -180,6 +180,14 @@ function rewriteText(text, opts = {}) {
       }
     );
   }
+  // Some madpuffers games URL-lock themselves (lock screen unless the host is
+  // in brandDomains). Add our hosts to the allow-list so the game just runs.
+  if (output.includes('this.brandDomains.push("madpuffers.com")') && !output.includes('this.brandDomains.push("z-chat.men")')) {
+    output = output.replace(
+      'this.brandDomains.push("madpuffers.com")',
+      'this.brandDomains.push("madpuffers.com"),this.brandDomains.push("z-chat.men"),this.brandDomains.push("127.0.0.1")'
+    );
+  }
   return output;
 }
 

@@ -271,6 +271,8 @@ def main(argv=None):
                 options.add_argument("--headless")
                 options.add_argument("--width=1280")
                 options.add_argument("--height=800")
+                options.set_preference("webgl.disabled", False)
+                options.set_preference("webgl.force-enabled", True)
                 driver = webdriver.Firefox(options=options)
                 driver.set_page_load_timeout(wait + 30.0)
             except Exception as exc:
