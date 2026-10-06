@@ -268,7 +268,8 @@ def main(argv=None):
         if chosen:
             try:
                 options = Options()
-                options.add_argument("--headless")
+                if not os.environ.get("DISPLAY"):
+                    options.add_argument("--headless")
                 options.add_argument("--width=1280")
                 options.add_argument("--height=800")
                 options.set_preference("webgl.disabled", False)
