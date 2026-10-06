@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Black-screen scanner for Z Games.
+"""Z Games frozen-screen scanner (screen-change detector).
 
-Loads every playable game for ~5s, screenshots the game iframe, and reports
-games whose screen is (confirmed) constantly black. Black candidates get one
-re-check after +10s to avoid flagging slow loaders.
+Loads every playable game, screenshots the game iframe right after it boots,
+screenshots again 5s later, and compares the two frames. A working game is
+always changing (animation, menu, gameplay); a stuck screen (black, frozen
+loader, error overlay) shows up as fewer than ~500 changed pixels between the
+frames. Those get one re-check 5s later to avoid flagging slow loaders.
 
 Usage:
-  blackscan.py --base http://127.0.0.1:8722 --workers 4 --wait 5
-  blackscan.py --slug basket-random            # spot check one game
+  blackscan.py --base https://game.z-chat.men --token <secret> --workers 2
+  blackscan.py --slug basket-random --token <secret>     # spot check
 
 Outputs:
-  /srv/zgames/state/blackscan.jsonl   (every game, one json line)
-  /srv/zgames/state/blackgames.txt    (confirmed black slugs, one per line)
+  /srv/zgames/state/frozen.jsonl      (every game, one json line)
+  /srv/zgames/state/brokengames.txt   (flagged slugs, one per line)
 """
 
 import argparse, io, json, os, sys, threading, time, urllib.parse, urllib.request
@@ -20,14 +22,21 @@ from queue import Queue
 from selenium import webdriver
 from selenium.webdriver.firefox.options import Options
 
-BLACK_THRESHOLD = 0.97   # fraction of near-black pixels to call a screen black
-PIXEL_CUT = 20           # max(r,g,b) <= this counts as a black pixel
-
+CHANGE_THRESHOLD = 500   # fewer changed pixels than this between frames = frozen
+PIXEL_DELTA = 12         # per-pixel luminance delta that counts as a change
 STATE_DIR = "/srv/zgames/state"
 
 
-def catalog_playable(base):
-    with urllib.request.urlopen(base + "/api/catalog", timeout=30) as r:
+def catalog_playable(base, token=""):
+    url = base + "/api/catalog"
+    if token:
+        url += "?zgtest=" + urllib.parse.quote(token)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/131.0 Safari/537.36"),
+        "Accept": "application/json",
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
         data = json.loads(r.read().decode("utf-8"))
     games = data.get("games") if isinstance(data, dict) else None
     if not isinstance(games, list):
@@ -41,20 +50,33 @@ def catalog_playable(base):
     return out
 
 
-def analyze(png_bytes):
-    """Return (black_fraction, width, height) for a PNG screenshot."""
+def load_frames(png1, png2):
+    from PIL import Image, ImageChops
+    im1 = Image.open(io.BytesIO(png1)).convert("RGB")
+    im2 = Image.open(io.BytesIO(png2)).convert("RGB")
+    return im1, im2
+
+
+def changed_pixels(png1, png2):
+    """Count pixels whose luminance changed by more than PIXEL_DELTA."""
+    from PIL import ImageChops
+    im1, im2 = load_frames(png1, png2)
+    if im1.size != im2.size:
+        return 10 ** 9, im1.size
+    diff = ImageChops.difference(im1, im2).convert("L")
+    hist = diff.histogram()
+    changed = sum(hist[PIXEL_DELTA + 1:])
+    return changed, im1.size
+
+
+def black_fraction(png):
     from PIL import Image
-    im = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    im = Image.open(io.BytesIO(png)).convert("RGB")
     w, h = im.size
-    # downscale for speed; a 4x reduction keeps plenty of detail
     im = im.resize((max(1, w // 4), max(1, h // 4)))
     px = list(im.getdata())
-    n = len(px) or 1
-    black = 0
-    for r, g, b in px:
-        if r <= PIXEL_CUT and g <= PIXEL_CUT and b <= PIXEL_CUT:
-            black += 1
-    return black / n, w, h
+    black = sum(1 for r, g, b in px if r <= 20 and g <= 20 and b <= 20)
+    return black / (len(px) or 1)
 
 
 def build_driver():
@@ -63,61 +85,66 @@ def build_driver():
     opts.set_preference("webgl.force-enabled", True)
     d = webdriver.Firefox(options=opts)
     d.set_window_size(1280, 800)
-    d.set_page_load_timeout(20)
+    d.set_page_load_timeout(25)
     return d
 
 
-def scan_one(driver, slug, base, wait):
-    """Return a result dict for one game."""
-    r = {"slug": slug, "status": "ok", "black_frac": None, "w": 0, "h": 0}
+def scan_one(driver, slug, base, token, pre_wait, gap):
+    r = {"slug": slug, "status": "ok", "changed": None, "changed2": None, "black": None, "w": 0, "h": 0}
+    url = base + "/play/" + urllib.parse.quote(slug)
+    if token:
+        url += "?zgtest=" + urllib.parse.quote(token)
     try:
-        driver.get(base + "/play/" + urllib.parse.quote(slug))
+        driver.get(url)
     except Exception:
-        pass  # hung subresources must not stop the scan
-    time.sleep(wait)
+        pass
+    time.sleep(pre_wait)
     try:
         frame = driver.find_element("id", "gameFrame")
     except Exception:
         r["status"] = "no-iframe"
         return r
     try:
-        frac, w, h = analyze(frame.screenshot_as_png)
+        shot1 = frame.screenshot_as_png
+        time.sleep(gap)
+        shot2 = frame.screenshot_as_png
+        changed, size = changed_pixels(shot1, shot2)
+        r["changed"], r["w"], r["h"] = changed, size[0], size[1]
+        r["black"] = round(black_fraction(shot2), 4)
+        if changed < CHANGE_THRESHOLD:
+            # nearly identical frames - frozen candidate; confirm once more
+            time.sleep(gap)
+            shot3 = frame.screenshot_as_png
+            changed2, _ = changed_pixels(shot2, shot3)
+            r["changed2"] = changed2
+            if changed2 < CHANGE_THRESHOLD:
+                r["status"] = "broken"          # stuck screen (black/frozen/error)
+            else:
+                r["status"] = "slow-boot"       # moved late - not broken
     except Exception as exc:
         r["status"] = "shot-error"
-        r["error"] = str(exc)[:120]
-        return r
-    r["black_frac"], r["w"], r["h"] = round(frac, 4), w, h
-    if frac >= BLACK_THRESHOLD:
-        # confirm: still black after a longer soak?
-        time.sleep(10)
-        try:
-            frac2, _, _ = analyze(frame.screenshot_as_png)
-        except Exception:
-            frac2 = frac
-        r["black_frac2"] = round(frac2, 4)
-        if frac2 >= BLACK_THRESHOLD:
-            r["status"] = "black"
-        else:
-            r["status"] = "slow-loader"
+        r["error"] = str(exc)[:160]
     return r
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base", default="http://127.0.0.1:8722")
-    ap.add_argument("--workers", type=int, default=4)
-    ap.add_argument("--wait", type=float, default=5.0)
+    ap.add_argument("--base", default="https://game.z-chat.men")
+    ap.add_argument("--token", default=os.environ.get("ZGAMES_TEST_TOKEN", ""))
+    ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--pre-wait", type=float, default=4.0, help="seconds before the first frame")
+    ap.add_argument("--gap", type=float, default=5.0, help="seconds between frames")
     ap.add_argument("--slug", action="append", default=[])
+    ap.add_argument("--rescan", action="store_true", help="re-scan slugs even if already in frozen.jsonl")
     args = ap.parse_args()
 
     base = args.base.rstrip("/")
     os.makedirs(STATE_DIR, exist_ok=True)
-    slugs = list(dict.fromkeys(args.slug)) or catalog_playable(base)
-    jsonl_path = os.path.join(STATE_DIR, "blackscan.jsonl")
+    slugs = list(dict.fromkeys(args.slug)) or catalog_playable(base, args.token)
+    jsonl_path = os.path.join(STATE_DIR, "frozen.jsonl")
 
-    # resume: skip games already scanned in a previous partial run
     done = set()
-    if not args.slug and os.path.exists(jsonl_path):
+    if not args.slug and not args.rescan and os.path.exists(jsonl_path):
         try:
             with open(jsonl_path, "r") as fh:
                 for line in fh:
@@ -131,12 +158,13 @@ def main():
     slugs = [s for s in slugs if s not in done]
     if done:
         print("resume: %d already scanned, %d remaining" % (total - len(slugs), len(slugs)), flush=True)
-    print("blackscan: %d games, %d workers, wait=%.1fs" % (len(slugs), args.workers, args.wait), flush=True)
+    print("frozen-scan: %d games, %d workers, pre-wait=%.1fs gap=%.1fs base=%s" % (
+        len(slugs), args.workers, args.pre_wait, args.gap, base), flush=True)
 
     q = Queue()
     lock = threading.Lock()
-    results = []
-    jsonl = open(jsonl_path, "a" if done or args.slug else "w", buffering=1)
+    counter = [0]
+    jsonl = open(jsonl_path, "a" if (done or args.slug or args.rescan) else "w", buffering=1)
 
     def worker(wid):
         driver = None
@@ -151,9 +179,9 @@ def main():
             except Exception:
                 break
             try:
-                r = scan_one(driver, slug, base, args.wait)
+                r = scan_one(driver, slug, base, args.token, args.pre_wait, args.gap)
             except Exception as exc:
-                r = {"slug": slug, "status": "driver-error", "error": str(exc)[:120]}
+                r = {"slug": slug, "status": "driver-error", "error": str(exc)[:160]}
                 try:
                     driver.quit()
                 except Exception:
@@ -164,12 +192,11 @@ def main():
                     driver = None
                     break
             with lock:
-                results.append(r)
                 jsonl.write(json.dumps(r) + "\n")
-                done = len(results)
-                if done % 10 == 0 or r["status"] != "ok":
-                    print("[%d/%d] %s -> %s %s" % (done, len(slugs), slug, r["status"],
-                          r.get("black_frac")), flush=True)
+                counter[0] += 1
+                if r["status"] != "ok" or counter[0] % 25 == 0:
+                    print("[%d/%d] %s %s changed=%s black=%s" % (
+                        counter[0], total, r["status"], slug, r.get("changed"), r.get("black")), flush=True)
             if driver is None:
                 break
         if driver is not None:
@@ -187,7 +214,6 @@ def main():
         t.join()
 
     jsonl.close()
-    # cumulative view across resumed runs (last result per slug wins)
     by_slug = {}
     try:
         with open(jsonl_path, "r") as fh:
@@ -200,20 +226,18 @@ def main():
     except OSError:
         pass
     allres = list(by_slug.values())
-    black = sorted(r["slug"] for r in allres if r["status"] == "black")
-    slow = sorted(r["slug"] for r in allres if r["status"] == "slow-loader")
-    broken = sorted(r["slug"] for r in allres if r["status"] in ("no-iframe", "shot-error", "driver-error"))
-    out = os.path.join(STATE_DIR, "blackgames.txt")
+    broken = sorted(r["slug"] for r in allres if r["status"] == "broken")
+    broken += sorted(r["slug"] for r in allres if r["status"] in ("no-iframe", "shot-error", "driver-error"))
+    slow = sorted(r["slug"] for r in allres if r["status"] == "slow-boot")
+    out = os.path.join(STATE_DIR, "brokengames.txt")
     with open(out, "w") as fh:
-        fh.write("\n".join(black) + ("\n" if black else ""))
+        fh.write("\n".join(broken) + ("\n" if broken else ""))
 
     print("", flush=True)
-    print("=== BLACKSCAN SUMMARY (cumulative) ===", flush=True)
-    print("tested=%d  ok=%d  black=%d  slow-loader=%d  broken=%d" % (
-        len(allres), len(allres) - len(black) - len(slow) - len(broken), len(black), len(slow), len(broken)), flush=True)
-    print("BLACK (%d): %s" % (len(black), ", ".join(black) or "-"), flush=True)
-    if broken:
-        print("BROKEN-NO-IFRAME (%d): %s" % (len(broken), ", ".join(broken[:40])), flush=True)
+    print("=== FROZEN-SCAN SUMMARY (cumulative) ===", flush=True)
+    print("tested=%d  ok=%d  broken(frozen)=%d  slow-boot=%d" % (
+        len(allres), len(allres) - len(broken) - len(slow), len(broken), len(slow)), flush=True)
+    print("BROKEN (%d): %s" % (len(broken), ", ".join(broken) or "-"), flush=True)
     print("written: %s" % out, flush=True)
     return 0
 

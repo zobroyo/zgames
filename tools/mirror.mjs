@@ -188,6 +188,14 @@ function rewriteText(text, opts = {}) {
       'this.brandDomains.push("madpuffers.com"),this.brandDomains.push("z-chat.men"),this.brandDomains.push("127.0.0.1")'
     );
   }
+  // Games that whitelist official hostnames via a regex array (PolyTrack and
+  // friends): add our domain so their "unofficial version" screens pass.
+  if (output.includes('[/\\.crazygames\\.com$/]') && !output.includes('z-chat\\.men$')) {
+    output = output.replaceAll(
+      '[/\\.crazygames\\.com$/]',
+      '[/\\.crazygames\\.com$/,/z-chat\\.men$/]'
+    );
+  }
   return output;
 }
 

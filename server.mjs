@@ -11,7 +11,16 @@ const ROOT = process.env.ROOT || "/srv/zgames/site";
 const MIRROR_DIR = process.env.MIRROR_DIR || "/srv/zgames/mirror";
 const CATALOG = process.env.CATALOG || path.join(ROOT, "catalog.json");
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://dwstivxwyqdogzgxnidm.supabase.co";
-const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "6122c80c-02a1-47fb-9a2f-17dba8403fe1";
+const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || "";
+/* Custom OAuth between Z Chat and Z Games: login leaves to the Z Chat consent
+   page (needs a Z Chat session there), which posts back to /api/oauth/approve
+   with the user's Supabase access token. This server verifies that token
+   against Supabase, then issues its own short-lived signed auth code that the
+   callback redeems (with PKCE). No third-party OAuth server involved. */
+const PORTAL_ORIGIN = process.env.PORTAL_ORIGIN || "https://z-chat.men";
+const OAUTH_CONSENT_URL = `${PORTAL_ORIGIN}/oauth/consent`;
+const OAUTH_CLIENT_ID = process.env.OAUTH_CLIENT_ID || "z-games";
+const AUTH_CODE_TTL_MS = 2 * 60 * 1000;
 const OAUTH_REDIRECT = process.env.OAUTH_REDIRECT || "https://game.z-chat.men/auth/callback";
 
 let SESSION_SECRET = process.env.SESSION_SECRET || "";
@@ -144,13 +153,105 @@ function injectGameShim(html) {
 
 /* Serve a mirrored game file: HTML documents get the SDK shim + isolation
    headers and are sent whole; everything else streams. */
+const JIT_HOSTS = new Set(["games.crazygames.com", "sdk.crazygames.com"]);
+const JIT_HOST_SUFFIXES = [".game-files.crazygames.com", ".files.crazygames.com"];
+const jitInFlight = new Map();
+const jitFailed = new Map();
+let jitActive = 0;
+
+function jitHostAllowed(host) {
+  const h = String(host || "").toLowerCase();
+  return JIT_HOSTS.has(h) || JIT_HOST_SUFFIXES.some((suffix) => h.endsWith(suffix));
+}
+
+/* JIT heal: a mirrored file was requested but is missing on disk. Fetch it
+   once from the original host, save it for the future, and let the normal
+   serving path continue. Every game the mirror missed becomes self-healing
+   the first time a player (or the scanner) touches it. */
+async function jitHeal(file) {
+  const rel = path.relative(MIRROR_DIR, path.resolve(file));
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return false;
+  const parts = rel.split(path.sep);
+  if (parts[0] !== "h") return false;
+  parts.shift();
+  const host = parts.shift();
+  if (!host || !parts.length || !jitHostAllowed(host)) return false;
+  const urlPath = parts.map((segment) => encodeURIComponent(segment)).join("/");
+  const url = `https://${host}/${urlPath}`;
+  const failedAt = jitFailed.get(url);
+  if (failedAt && Date.now() - failedAt < 10 * 60 * 1000) return false;
+  const existing = jitInFlight.get(url);
+  if (existing) {
+    try {
+      await existing;
+    } catch {
+      /* fall through to stat */
+    }
+    try {
+      const stat = await fs.stat(file);
+      return stat.isFile();
+    } catch {
+      return false;
+    }
+  }
+  if (jitActive >= 4) return false;
+  jitActive += 1;
+  const task = (async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
+          Referer: "https://www.crazygames.com/",
+          Accept: "*/*",
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        jitFailed.set(url, Date.now());
+        return;
+      }
+      let data = Buffer.from(await response.arrayBuffer());
+      if (!data.length || data.length > 128 * 1024 * 1024) {
+        jitFailed.set(url, Date.now());
+        return;
+      }
+      if (file.toLowerCase().endsWith(".json") && data.subarray(0, 3).equals(Buffer.from([0xef, 0xbb, 0xbf]))) {
+        data = data.subarray(3);
+      }
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, data);
+      console.log(`[jit] healed ${host}/${urlPath} (${data.length} bytes)`);
+    } catch {
+      jitFailed.set(url, Date.now());
+    } finally {
+      clearTimeout(timer);
+    }
+  })().finally(() => {
+    jitInFlight.delete(url);
+    jitActive -= 1;
+  });
+  jitInFlight.set(url, task);
+  await task;
+  try {
+    const stat = await fs.stat(file);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function serveMirrorFile(req, res, file, cacheControl) {
   if (file.toLowerCase().endsWith(".html") && req.method !== "HEAD") {
     let data;
     try {
       data = await fs.readFile(file);
     } catch (err) {
-      if (err.code === "ENOENT" || err.code === "EISDIR") return notFound(req, res);
+      if (err.code === "ENOENT" || err.code === "EISDIR") {
+        if (await jitHeal(file)) return serveMirrorFile(req, res, file, cacheControl);
+        return notFound(req, res);
+      }
       throw err;
     }
     if (data.length > 4 * 1024 * 1024) {
@@ -261,6 +362,45 @@ function verifySession(token) {
   }
 }
 
+function signAuthCode(payload) {
+  const body = b64url(JSON.stringify({ ...payload, exp: Date.now() + AUTH_CODE_TTL_MS }));
+  const mac = crypto.createHmac("sha256", SESSION_SECRET + ":code").update(body).digest("hex");
+  return `${body}.${mac}`;
+}
+
+function verifyAuthCode(token) {
+  if (!token || typeof token !== "string") return null;
+  const dot = token.lastIndexOf(".");
+  if (dot <= 0) return null;
+  const body = token.slice(0, dot);
+  const mac = Buffer.from(token.slice(dot + 1), "hex");
+  const want = crypto.createHmac("sha256", SESSION_SECRET + ":code").update(body).digest();
+  if (mac.length !== want.length || !crypto.timingSafeEqual(mac, want)) return null;
+  try {
+    const data = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (typeof data.exp !== "number" || Date.now() > data.exp) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function readBody(req, limit = 16384) {
+  return new Promise((resolve) => {
+    let data = "";
+    let over = false;
+    req.on("data", (chunk) => {
+      data += chunk;
+      if (data.length > limit) {
+        over = true;
+        req.destroy();
+      }
+    });
+    req.on("end", () => resolve(over ? null : data));
+    req.on("error", () => resolve(null));
+  });
+}
+
 function safeEqual(a, b) {
   const x = Buffer.from(String(a));
   const y = Buffer.from(String(b));
@@ -357,7 +497,15 @@ async function streamFile(req, res, file, cacheControl, extraHeaders) {
   try {
     stat = await fs.stat(file);
   } catch {
-    return notFound(req, res);
+    if (await jitHeal(file)) {
+      try {
+        stat = await fs.stat(file);
+      } catch {
+        return notFound(req, res);
+      }
+    } else {
+      return notFound(req, res);
+    }
   }
   if (!stat.isFile()) return notFound(req, res);
   res.writeHead(200, {
@@ -390,16 +538,16 @@ async function sendFile(req, res, file, cacheControl, extraHeaders) {
 
 /* Auth routes */
 
-function handleLogin(req, res) {
+function handleLogin(req, res, url) {
   const state = crypto.randomBytes(16).toString("hex");
   const verifier = b64url(crypto.randomBytes(32));
   const challenge = b64url(crypto.createHash("sha256").update(verifier).digest());
+  const rawNext = (url && url.searchParams.get("next")) || "";
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") && rawNext.length <= 300 ? rawNext : "";
   const location =
-    `${SUPABASE_URL}/auth/v1/oauth/authorize` +
-    `?client_id=${OAUTH_CLIENT_ID}` +
+    `${OAUTH_CONSENT_URL}` +
+    `?client_id=${encodeURIComponent(OAUTH_CLIENT_ID)}` +
     `&redirect_uri=${encodeURIComponent(OAUTH_REDIRECT)}` +
-    `&response_type=code` +
-    `&scope=${encodeURIComponent("openid email profile")}` +
     `&state=${state}` +
     `&code_challenge=${challenge}` +
     `&code_challenge_method=S256`;
@@ -412,6 +560,9 @@ function handleLogin(req, res) {
       "Set-Cookie": [
         `zg_state=${state}; ${COOKIE_OPTS}; Max-Age=600`,
         `zg_verifier=${verifier}; ${COOKIE_OPTS}; Max-Age=600`,
+        next
+          ? `zg_next=${encodeURIComponent(next)}; ${COOKIE_OPTS}; Max-Age=600`
+          : `zg_next=; ${COOKIE_OPTS}; Max-Age=0`,
       ],
       "Cache-Control": "no-store",
     },
@@ -433,16 +584,6 @@ function authFail(req, res, status, message) {
   );
 }
 
-function decodeJwtPayload(jwt) {
-  try {
-    const parts = String(jwt).split(".");
-    if (parts.length < 2) return null;
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
 function normalizeUser(source) {
   const meta = source.user_metadata || {};
   const email = source.email || "";
@@ -451,99 +592,106 @@ function normalizeUser(source) {
   return { id: source.id || source.sub || "", email, name, avatar };
 }
 
-async function fetchToken(fields) {
-  const response = await fetch(`${SUPABASE_URL}/auth/v1/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(fields),
-  });
-  if (!response.ok) {
-    const text = await response.text().catch(() => "");
-    throw new Error(`token exchange failed (${response.status}) ${text.slice(0, 200)}`);
-  }
-  return response.json();
-}
-
-async function resolveUser(token) {
-  if (token.id_token) {
-    const claims = decodeJwtPayload(token.id_token);
-    if (claims && (claims.sub || claims.email)) {
-      return normalizeUser({
-        id: claims.sub,
-        email: claims.email,
-        name: claims.name,
-        picture: claims.picture,
-        user_metadata: claims.user_metadata,
-      });
-    }
-  }
-  if (token.access_token) {
-    const info = await fetch(`${SUPABASE_URL}/auth/v1/oauth/userinfo`, {
-      headers: { Authorization: `Bearer ${token.access_token}` },
+/* POST /api/oauth/approve - called (cross-origin) by the Z Chat consent page
+   with the user's Z Chat (Supabase) access token. Verifies the token against
+   Supabase, then mints the short-lived signed auth code for the callback. */
+async function handleApprove(req, res) {
+  const cors = {
+    "Access-Control-Allow-Origin": PORTAL_ORIGIN,
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "authorization, content-type",
+    "Access-Control-Max-Age": "600",
+    "Cache-Control": "no-store",
+  };
+  const json = { ...cors, "Content-Type": "application/json; charset=utf-8" };
+  if (req.method === "OPTIONS") return send(req, res, 204, cors);
+  const match = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  if (!match) return send(req, res, 401, json, JSON.stringify({ error: "missing_token" }));
+  let user = null;
+  try {
+    const response = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${match[1]}` },
     });
-    if (info.ok) {
-      const data = await info.json();
-      if (data && (data.sub || data.email)) {
-        return normalizeUser({
-          id: data.sub,
-          email: data.email,
-          name: data.name,
-          picture: data.picture,
-          user_metadata: data.user_metadata,
-        });
-      }
-    }
-    const user = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-      headers: { apikey: "", Authorization: `Bearer ${token.access_token}` },
-    });
-    if (user.ok) {
-      const data = await user.json();
+    if (response.ok) {
+      const data = await response.json();
       if (data && (data.id || data.email)) {
-        return normalizeUser({ id: data.id, email: data.email, user_metadata: data.user_metadata });
+        user = normalizeUser({ id: data.id, email: data.email, user_metadata: data.user_metadata });
       }
     }
+  } catch {
+    /* fall through to invalid_token */
   }
-  return null;
+  if (!user || !user.id) return send(req, res, 401, json, JSON.stringify({ error: "invalid_token" }));
+  const raw = await readBody(req);
+  let body = null;
+  try {
+    body = JSON.parse(raw || "{}");
+  } catch {
+    body = null;
+  }
+  if (!body || typeof body !== "object") {
+    return send(req, res, 400, json, JSON.stringify({ error: "bad_request" }));
+  }
+  const redirectUri = String(body.redirect_uri || "");
+  const state = String(body.state || "");
+  const challenge = String(body.code_challenge || "");
+  if (redirectUri !== OAUTH_REDIRECT) {
+    return send(req, res, 400, json, JSON.stringify({ error: "bad_redirect_uri" }));
+  }
+  if (!challenge || challenge.length > 200) {
+    return send(req, res, 400, json, JSON.stringify({ error: "bad_challenge" }));
+  }
+  const code = signAuthCode({
+    sub: user.id,
+    email: user.email,
+    name: user.name,
+    avatar: user.avatar,
+    challenge,
+  });
+  const redirect =
+    redirectUri + "?code=" + encodeURIComponent(code) + "&state=" + encodeURIComponent(state);
+  send(req, res, 200, json, JSON.stringify({ redirect }));
 }
 
 async function handleCallback(req, res, url) {
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
   const cookies = parseCookies(req);
+  if (url.searchParams.get("error")) return authFail(req, res, 400, "Sign-in was cancelled.");
   if (!code) return authFail(req, res, 400, "Missing authorization code.");
   if (!state || !cookies.zg_state || !safeEqual(state, cookies.zg_state)) {
     return authFail(req, res, 403, "Invalid state - please try signing in again.");
   }
   if (!cookies.zg_verifier) return authFail(req, res, 400, "Missing PKCE verifier - please try signing in again.");
-  try {
-    const token = await fetchToken({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: OAUTH_REDIRECT,
-      client_id: OAUTH_CLIENT_ID,
-      code_verifier: cookies.zg_verifier,
-    });
-    const user = await resolveUser(token);
-    if (!user || !user.id) return authFail(req, res, 400, "Could not read your account details.");
-    send(
-      req,
-      res,
-      302,
-      {
-        Location: "/",
-        "Set-Cookie": [
-          sessionCookie(signSession(user), SESSION_MAX_AGE),
-          `zg_state=; ${COOKIE_OPTS}; Max-Age=0`,
-          `zg_verifier=; ${COOKIE_OPTS}; Max-Age=0`,
-        ],
-        "Cache-Control": "no-store",
-      },
-      ""
-    );
-  } catch (err) {
-    console.error("[zgames] auth callback failed:", err);
-    authFail(req, res, 400, "Sign-in failed. Please try again.");
+  const data = verifyAuthCode(code);
+  if (!data) return authFail(req, res, 400, "This sign-in link is invalid or expired. Please try again.");
+  const challenge = b64url(crypto.createHash("sha256").update(cookies.zg_verifier).digest());
+  if (!data.challenge || !safeEqual(challenge, data.challenge)) {
+    return authFail(req, res, 403, "Could not verify the sign-in request. Please try again.");
   }
+  const user = { id: data.sub, email: data.email, name: data.name, avatar: data.avatar };
+  if (!user.id) return authFail(req, res, 400, "Could not read your account details.");
+  let next = "/";
+  try {
+    const rawNext = cookies.zg_next ? decodeURIComponent(cookies.zg_next) : "";
+    if (rawNext.startsWith("/") && !rawNext.startsWith("//") && rawNext.length <= 300) next = rawNext;
+  } catch {}
+  send(
+    req,
+    res,
+    302,
+    {
+      Location: next,
+      "Set-Cookie": [
+        sessionCookie(signSession(user), SESSION_MAX_AGE),
+        `zg_state=; ${COOKIE_OPTS}; Max-Age=0`,
+        `zg_verifier=; ${COOKIE_OPTS}; Max-Age=0`,
+        `zg_next=; ${COOKIE_OPTS}; Max-Age=0`,
+      ],
+      "Cache-Control": "no-store",
+    },
+    ""
+  );
 }
 
 function handleMe(req, res) {
@@ -554,6 +702,15 @@ function handleMe(req, res) {
 
 function handleLogout(req, res) {
   send(req, res, 302, { Location: "/", "Set-Cookie": sessionCookie("", 0), "Cache-Control": "no-store" }, "");
+}
+
+/* Trusted local tooling (selftest, scanners) talks to the loopback address
+   directly; public traffic arrives via the Cloudflare tunnel, which always
+   carries a cf-connecting-ip header. Only the former may skip the play gate. */
+function isTrustedLocal(req) {
+  const ra = (req.socket && req.socket.remoteAddress) || "";
+  const loopback = ra === "127.0.0.1" || ra === "::1" || ra === "::ffff:127.0.0.1";
+  return loopback && !req.headers["cf-connecting-ip"];
 }
 
 /* Router */
@@ -600,14 +757,34 @@ async function route(req, res) {
     }
   }
 
-  if (pathname === "/play" || pathname.startsWith("/play/")) {
+  if (pathname === "/play" || pathname.startsWith("/play/") || pathname === "/play.html") {
     if (!isRead(method)) return methodNotAllowed(req, res);
+    const session = verifySession(parseCookies(req).zg_session);
+    const testToken = process.env.ZGAMES_TEST_TOKEN || "";
+    const tokenOk = Boolean(testToken) && url.searchParams.get("zgtest") === testToken;
+    if (!session && !isTrustedLocal(req) && !tokenOk) {
+      return send(
+        req,
+        res,
+        302,
+        {
+          Location: "/auth/login?next=" + encodeURIComponent(pathname),
+          "Cache-Control": "no-store",
+        },
+        ""
+      );
+    }
     return sendFile(req, res, path.join(ROOT, "play.html"), "no-cache");
+  }
+
+  if (pathname === "/api/oauth/approve") {
+    if (method !== "POST" && method !== "OPTIONS") return methodNotAllowed(req, res, "POST, OPTIONS");
+    return handleApprove(req, res);
   }
 
   if (pathname === "/auth/login") {
     if (!isRead(method)) return methodNotAllowed(req, res);
-    return handleLogin(req, res);
+    return handleLogin(req, res, url);
   }
 
   if (pathname === "/auth/callback") {
@@ -648,7 +825,7 @@ async function route(req, res) {
     return streamFile(req, res, target, "public, max-age=3600");
   }
 
-  if (pathname === "/" || pathname === "/styles.css" || pathname === "/app.js" || pathname === "/play.html" || pathname === "/index.html") {
+  if (pathname === "/" || pathname === "/styles.css" || pathname === "/app.js" || pathname === "/index.html") {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const file = pathname === "/" ? path.join(ROOT, "index.html") : path.join(ROOT, pathname.slice(1));
     const isolate = file.endsWith(".html") ? ISOLATION_HEADERS : undefined;
