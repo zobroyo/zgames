@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Playing &mdash; Z Games</title>
+  <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body data-page="play" class="play-body">
+  <header class="play-bar">
+    <a class="back-link" href="/">&larr; All games</a>
+    <h1 id="playTitle" class="play-title">Loading&hellip;</h1>
+    <div class="play-actions">
+      <button id="fullscreenBtn" class="btn btn-ghost btn-small" type="button">Fullscreen</button>
+      <div id="account" class="account" aria-live="polite"></div>
+    </div>
+  </header>
+
+  <main class="play-stage">
+    <div id="frameWrap" class="frame-wrap">
+      <iframe id="gameFrame" class="game-frame" title="Game"
+              allow="autoplay; fullscreen; gamepad; clipboard-read; clipboard-write; encrypted-media"
+              allowfullscreen referrerpolicy="no-referrer"></iframe>
+      <div id="modeBadge" class="mode-badge" hidden></div>
+      <div id="loadHint" class="load-hint" hidden></div>
+    </div>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+[Unit]
+Description=Mirror CrazyGames catalog to /srv/zgames/mirror
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=zchat
+Group=zchat
+Environment=HOME=/srv/zchat
+WorkingDirectory=/srv/zgames
+TimeoutStartSec=0
+
+# Same sandbox as zgames.service.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+ProtectProc=invisible
+ProcSubset=pid
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/srv/zgames
+
+ExecStart=/usr/bin/node /srv/zgames/tools/mirror.mjs --limit 2000 --concurrency 6

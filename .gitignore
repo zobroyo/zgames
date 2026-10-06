@@ -1,0 +1,5 @@
+node_modules/
+mirror/
+site/catalog.json
+site/covers/
+*.log

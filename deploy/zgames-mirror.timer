@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the Z Games catalog mirror 5 minutes after boot and every 6 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
