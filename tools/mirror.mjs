@@ -573,6 +573,81 @@ async function mirrorGame(slug) {
 
 /* ----------------------------------------------------------------- sitemap */
 
+const SEED_PAGES = [
+  "https://www.crazygames.com/",
+  "https://www.crazygames.com/new",
+  "https://www.crazygames.com/action",
+  "https://www.crazygames.com/adventure",
+  "https://www.crazygames.com/arcade",
+  "https://www.crazygames.com/puzzle",
+  "https://www.crazygames.com/shooting",
+  "https://www.crazygames.com/sports",
+  "https://www.crazygames.com/racing",
+  "https://www.crazygames.com/strategy",
+  "https://www.crazygames.com/clicker",
+  "https://www.crazygames.com/io",
+  "https://www.crazygames.com/casual",
+  "https://www.crazygames.com/multiplayer",
+  "https://www.crazygames.com/3d",
+  "https://www.crazygames.com/2d",
+  "https://www.crazygames.com/board",
+  "https://www.crazygames.com/card",
+  "https://www.crazygames.com/cooking",
+  "https://www.crazygames.com/dress-up",
+  "https://www.crazygames.com/horror",
+  "https://www.crazygames.com/music",
+  "https://www.crazygames.com/parkour",
+  "https://www.crazygames.com/survival",
+  "https://www.crazygames.com/tower-defense",
+  "https://www.crazygames.com/basketball",
+  "https://www.crazygames.com/soccer",
+  "https://www.crazygames.com/drift",
+  "https://www.crazygames.com/escape",
+  "https://www.crazygames.com/farm",
+  "https://www.crazygames.com/fighting",
+  "https://www.crazygames.com/golf",
+  "https://www.crazygames.com/idle",
+  "https://www.crazygames.com/moto",
+  "https://www.crazygames.com/pool",
+  "https://www.crazygames.com/runner",
+  "https://www.crazygames.com/space",
+  "https://www.crazygames.com/stickman",
+  "https://www.crazygames.com/tank",
+  "https://www.crazygames.com/war",
+  "https://www.crazygames.com/zombie",
+];
+
+/**
+ * Slugs from the live homepage + category pages. These are currently published
+ * and popular games, so they mirror far more reliably than sitemap order (which
+ * starts with years-old entries whose builds are gone). Tried before the
+ * sitemap so `--limit` reaches playable games first.
+ */
+async function fetchSeedSlugs() {
+  const slugs = [];
+  const seen = new Set();
+  for (const page of SEED_PAGES) {
+    if (slugs.length >= 1500) break;
+    let result;
+    try {
+      result = await fetchWithRetry(page);
+    } catch {
+      continue;
+    }
+    if (!result || result.status !== 200) continue;
+    const html = result.buffer.toString("utf8");
+    const re = /\/game\/([a-z0-9][a-z0-9-]{0,80})/gi;
+    let match;
+    while ((match = re.exec(html))) {
+      const slug = match[1].toLowerCase();
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      slugs.push(slug);
+    }
+  }
+  return slugs;
+}
+
 async function fetchSitemapSlugs() {
   let result;
   try {
@@ -620,8 +695,12 @@ async function main() {
     slugs = [ONLY];
   } else {
     console.log(`[mirror] fetching ${SITEMAP_URL}`);
-    slugs = await fetchSitemapSlugs();
-    console.log(`[mirror] sitemap: ${slugs.length} games (deduped, document order)`);
+    const sitemapSlugs = await fetchSitemapSlugs();
+    console.log(`[mirror] sitemap: ${sitemapSlugs.length} games (deduped, document order)`);
+    console.log(`[mirror] fetching popular game lists`);
+    const seedSlugs = await fetchSeedSlugs();
+    console.log(`[mirror] popular: ${seedSlugs.length} slugs (tried first)`);
+    slugs = [...new Set([...seedSlugs, ...sitemapSlugs])];
   }
 
   let attempted = 0;

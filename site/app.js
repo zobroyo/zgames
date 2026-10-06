@@ -193,6 +193,7 @@
     mountAccount(document.getElementById("account"));
 
     var allGames = [];
+    var catalogTotal = 0;
     var query = "";
 
     function setStatus(message) {
@@ -238,7 +239,9 @@
 
     function setCount(total) {
       if (!countLabel) return;
-      countLabel.textContent = total === 0 ? "" : total + (total === 1 ? " game" : " games");
+      var text = total === 0 ? "" : total + (total === 1 ? " game" : " games");
+      if (catalogTotal > total) text += " \u00b7 syncing\u2026";
+      countLabel.textContent = text;
     }
 
     grid.setAttribute("aria-busy", "true");
@@ -258,6 +261,7 @@
 
     fetchJSON("/api/catalog").then(function (data) {
       var games = data && Array.isArray(data.games) ? data.games : [];
+      catalogTotal = games.length;
       allGames = sortGames(games.filter(function (game) {
         return game && game.slug && isLocalStatus(game.status);
       }));
