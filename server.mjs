@@ -988,7 +988,13 @@ async function route(req, res) {
     return streamFile(req, res, target, "public, max-age=3600");
   }
 
-  if (pathname === "/" || pathname === "/styles.css" || pathname === "/app.js" || pathname === "/index.html") {
+  if (
+    pathname === "/" ||
+    pathname === "/styles.css" ||
+    pathname === "/app.js" ||
+    pathname === "/save-sync.js" ||
+    pathname === "/index.html"
+  ) {
     if (!isRead(method)) return methodNotAllowed(req, res);
     const file = pathname === "/" ? path.join(ROOT, "index.html") : path.join(ROOT, pathname.slice(1));
     const isolate = file.endsWith(".html") ? ISOLATION_HEADERS : undefined;
@@ -1010,6 +1016,7 @@ async function route(req, res) {
 const server = http.createServer((req, res) => {
   const logPath = req.url || "";
   const logIt = logPath.startsWith("/mirror/") || logPath.startsWith("/play") ||
+                logPath.startsWith("/api/saves") ||
                 logPath.endsWith("/sw.js") || logPath === "/healthz";
   if (logIt) {
     const t0 = Date.now();
