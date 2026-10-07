@@ -41,7 +41,14 @@ async function call(name, args) {
   if (!res.ok || !body || body.error) {
     throw new Error(`${name} failed: ${res.status} ${JSON.stringify(body?.error || body)}`);
   }
-  return body.result;
+  const result = body.result;
+  if (result && result.isError) {
+    const text = Array.isArray(result.content)
+      ? result.content.map((c) => c.text).join(" ")
+      : JSON.stringify(result);
+    throw new Error(`${name} rejected: ${text}`);
+  }
+  return result;
 }
 
 const files = walk("site").filter((f) => {
