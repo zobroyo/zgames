@@ -138,7 +138,15 @@
     if (wrote) writeStamps(stamps);
     var base = Math.max(localTs, cloudTs);
     writeSaved(base > 0 ? base : Date.now());
-    baseline = collect();
+    /* The baseline is the server's content, not the local content: keys the
+       game wrote locally before/outside the cloud flow still get pushed by the
+       first diff. */
+    baseline = {};
+    if (cloudKeys) {
+      Object.keys(cloudKeys).forEach(function (key) {
+        if (typeof cloudKeys[key] === "string") baseline[key] = cloudKeys[key];
+      });
+    }
   }
 
   /* Keep the newest keys that fit: iterate oldest -> newest, greedily add. */
