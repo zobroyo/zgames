@@ -10,6 +10,11 @@ const PORT = Number(process.env.PORT || 8722);
 const ROOT = process.env.ROOT || "/srv/zgames/site";
 const MIRROR_DIR = process.env.MIRROR_DIR || "/srv/zgames/mirror";
 const CATALOG = process.env.CATALOG || path.join(ROOT, "catalog.json");
+/* Per-user cloud saves: /srv/zgames/state/saves/<userId>/<slug>.json */
+const STATE_DIR = process.env.STATE_DIR || path.join(path.dirname(path.resolve(ROOT)), "state");
+const SAVES_DIR = process.env.SAVES_DIR || path.join(STATE_DIR, "saves");
+const SAVE_MAX_BYTES = 256 * 1024;
+const SAVE_SLUG_RE = /^[a-z0-9-]{1,64}$/;
 const SUPABASE_URL = process.env.SUPABASE_URL || "https://dwstivxwyqdogzgxnidm.supabase.co";
 const SUPABASE_KEY = process.env.SUPABASE_PUBLISHABLE_KEY || "";
 /* Custom OAuth between Z Chat and Z Games: login leaves to the Z Chat consent
@@ -401,6 +406,30 @@ function readBody(req, limit = 16384) {
   });
 }
 
+/* Byte-accurate body reader for binary-size caps. Over-limit bodies are
+   drained (bounded, so a malicious stream cannot pin the socket forever) and
+   resolve null so the caller can answer 413. */
+function readBodyBuffer(req, limit) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    let over = false;
+    req.on("data", (chunk) => {
+      if (over) return;
+      size += chunk.length;
+      if (size > limit) {
+        over = true;
+        chunks.length = 0;
+        if (size > limit * 4) req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(over ? null : Buffer.concat(chunks)));
+    req.on("error", () => resolve(null));
+  });
+}
+
 function safeEqual(a, b) {
   const x = Buffer.from(String(a));
   const y = Buffer.from(String(b));
@@ -732,6 +761,112 @@ function isTrustedLocal(req) {
   return loopback && !req.headers["cf-connecting-ip"];
 }
 
+/* Auth shared by the play gate and the saves API: a verified session cookie is
+   a real user; trusted-local tooling and the zgtest token are guests. */
+function requestAuth(req, url) {
+  const session = verifySession(parseCookies(req).zg_session);
+  if (session && session.id) return { user: session };
+  const testToken = process.env.ZGAMES_TEST_TOKEN || "";
+  if (testToken && url.searchParams.get("zgtest") === testToken) return { guest: "test" };
+  if (isTrustedLocal(req)) return { guest: "local" };
+  return null;
+}
+
+/* Cloud saves: one JSON blob per user per game slug, stored at
+   SAVES_DIR/<userId>/<slug>.json (dir 0700, file 0600, atomic rename). */
+
+function saveUserDir(userId) {
+  const value = String(userId || "");
+  const safe = /^[A-Za-z0-9-]{1,64}$/.test(value)
+    ? value
+    : crypto.createHash("sha256").update(value).digest("hex");
+  return path.join(SAVES_DIR, safe);
+}
+
+function saveFilePath(userId, slug) {
+  return path.join(saveUserDir(userId), `${slug}.json`);
+}
+
+function saveJSON(req, res, status, obj) {
+  return send(
+    req,
+    res,
+    status,
+    { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+    JSON.stringify(obj)
+  );
+}
+
+function validSaveBlob(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const keys = value.keys === undefined ? {} : value.keys;
+  if (!keys || typeof keys !== "object" || Array.isArray(keys)) return null;
+  for (const name of Object.keys(keys)) {
+    if (typeof keys[name] !== "string") return null;
+  }
+  if (value.__zsaved !== undefined && (typeof value.__zsaved !== "number" || !Number.isFinite(value.__zsaved))) {
+    return null;
+  }
+  return value;
+}
+
+async function handleSaveGet(req, res, userId, slug) {
+  let raw;
+  try {
+    raw = await fs.readFile(saveFilePath(userId, slug));
+  } catch (err) {
+    if (err.code === "ENOENT" || err.code === "EISDIR") return saveJSON(req, res, 404, { error: "not_found" });
+    throw err;
+  }
+  try {
+    JSON.parse(raw.toString("utf8"));
+  } catch {
+    return saveJSON(req, res, 404, { error: "not_found" });
+  }
+  return send(req, res, 200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }, raw);
+}
+
+async function handleSavePut(req, res, userId, slug) {
+  const raw = await readBodyBuffer(req, SAVE_MAX_BYTES);
+  if (raw === null) return saveJSON(req, res, 413, { error: "too_large", limit: SAVE_MAX_BYTES });
+  if (!raw.length) return saveJSON(req, res, 400, { error: "empty_body" });
+  let parsed;
+  try {
+    parsed = JSON.parse(raw.toString("utf8"));
+  } catch {
+    return saveJSON(req, res, 400, { error: "invalid_json" });
+  }
+  const blob = validSaveBlob(parsed);
+  if (!blob) return saveJSON(req, res, 400, { error: "invalid_blob" });
+  const payload = Buffer.from(JSON.stringify(blob), "utf8");
+  if (payload.length > SAVE_MAX_BYTES) return saveJSON(req, res, 413, { error: "too_large", limit: SAVE_MAX_BYTES });
+
+  const file = saveFilePath(userId, slug);
+  const dir = path.dirname(file);
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  try {
+    await fs.chmod(dir, 0o700);
+  } catch {
+    /* pre-existing dir we do not own - leave it */
+  }
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+  try {
+    await fs.writeFile(tmp, payload, { mode: 0o600 });
+    await fs.chmod(tmp, 0o600);
+    await fs.rename(tmp, file);
+  } catch (err) {
+    try {
+      await fs.unlink(tmp);
+    } catch {}
+    throw err;
+  }
+  return saveJSON(req, res, 200, {
+    ok: true,
+    bytes: payload.length,
+    __zsaved: typeof blob.__zsaved === "number" ? blob.__zsaved : null,
+  });
+}
+
 /* Router */
 
 async function route(req, res) {
@@ -778,10 +913,8 @@ async function route(req, res) {
 
   if (pathname === "/play" || pathname.startsWith("/play/") || pathname === "/play.html") {
     if (!isRead(method)) return methodNotAllowed(req, res);
-    const session = verifySession(parseCookies(req).zg_session);
-    const testToken = process.env.ZGAMES_TEST_TOKEN || "";
-    const tokenOk = Boolean(testToken) && url.searchParams.get("zgtest") === testToken;
-    if (!session && !isTrustedLocal(req) && !tokenOk) {
+    const auth = requestAuth(req, url);
+    if (!auth) {
       return send(
         req,
         res,
@@ -794,6 +927,17 @@ async function route(req, res) {
       );
     }
     return sendFile(req, res, path.join(ROOT, "play.html"), "no-cache");
+  }
+
+  if (pathname === "/api/saves" || pathname.startsWith("/api/saves/")) {
+    const auth = requestAuth(req, url);
+    if (!auth) return saveJSON(req, res, 401, { error: "auth_required" });
+    if (!auth.user) return saveJSON(req, res, 403, { error: "guests_have_no_cloud_saves" });
+    const slug = pathname.startsWith("/api/saves/") ? pathname.slice("/api/saves/".length) : "";
+    if (!SAVE_SLUG_RE.test(slug)) return saveJSON(req, res, 400, { error: "bad_slug" });
+    if (method === "GET" || method === "HEAD") return handleSaveGet(req, res, auth.user.id, slug);
+    if (method === "PUT") return handleSavePut(req, res, auth.user.id, slug);
+    return methodNotAllowed(req, res, "GET, HEAD, PUT");
   }
 
   if (pathname === "/api/oauth/approve") {
