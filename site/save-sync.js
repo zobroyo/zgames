@@ -149,17 +149,18 @@
     }
   }
 
-  /* Keep the newest keys that fit: iterate oldest -> newest, greedily add. */
+  /* Over budget: evict oldest-stamped keys until the upload fits (newest keys
+     are the ones worth keeping). */
   function prune(keys, stamps) {
-    var out = {};
     var names = Object.keys(keys).sort(function (a, b) {
       return (stamps[a] || 0) - (stamps[b] || 0);
     });
-    for (var i = 0; i < names.length; i++) {
-      out[names[i]] = keys[names[i]];
-      if (bytes(JSON.stringify({ keys: out, __zsaved: Date.now() })) > BUDGET) {
-        delete out[names[i]];
-      }
+    var out = {};
+    names.forEach(function (name) {
+      out[name] = keys[name];
+    });
+    while (names.length && bytes(JSON.stringify({ keys: out, __zsaved: Date.now() })) > BUDGET) {
+      delete out[names.shift()];
     }
     return out;
   }
