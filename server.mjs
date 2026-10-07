@@ -220,6 +220,7 @@ async function jitHeal(file) {
         signal: controller.signal,
       });
       if (!response.ok) {
+        console.log(`[jit] miss ${host}/${urlPath} -> HTTP ${response.status}`);
         jitFailed.set(url, Date.now());
         return;
       }
@@ -234,7 +235,8 @@ async function jitHeal(file) {
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, data);
       console.log(`[jit] healed ${host}/${urlPath} (${data.length} bytes)`);
-    } catch {
+    } catch (err) {
+      console.log(`[jit] error ${host}/${urlPath}: ${err?.cause?.code || err?.message || "unknown"}`);
       jitFailed.set(url, Date.now());
     } finally {
       clearTimeout(timer);
