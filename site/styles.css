@@ -1,6 +1,6 @@
 /* ==========================================================================
    Z Games — single stylesheet (no external fonts, no frameworks, no build)
-   Design language ported from z-games-hub: dark teal surfaces + lime accent,
+   Design language ported from z-games-hub: dark teal surfaces + green accent,
    flat bordered cards, Space Grotesk / DM Sans when available (system fallbacks,
    never fetched from the network so the portal still works fully offline).
 
@@ -32,19 +32,19 @@
   --border: oklch(0.3 0.013 193);
   --input: oklch(0.33 0.013 193);
 
-  /* accent — lime */
-  --primary: oklch(0.91 0.17 121);
+  /* accent — green */
+  --primary: oklch(0.80 0.20 148);
   --primary-foreground: oklch(0.16 0.015 175);
-  --primary-strong: oklch(0.85 0.18 128);
-  --ring: oklch(0.91 0.17 121 / 45%);
+  --primary-strong: oklch(0.72 0.21 150);
+  --ring: oklch(0.80 0.20 148 / 45%);
   --accent-1: var(--primary);
   --accent-2: var(--primary-strong);
-  --accent-grad: linear-gradient(135deg, oklch(0.93 0.16 118) 0%, oklch(0.86 0.18 128) 100%);
+  --accent-grad: linear-gradient(135deg, oklch(0.84 0.18 145) 0%, oklch(0.74 0.21 152) 100%);
   --accent-ink: var(--primary-foreground);
 
-  /* local badge stays emerald so "LOCAL" reads as its own signal */
-  --local: oklch(0.78 0.15 155);
-  --local-bg: oklch(0.78 0.15 155 / 12%);
+  /* local badge stays cyan so "LOCAL" reads as its own signal */
+  --local: oklch(0.78 0.13 205);
+  --local-bg: oklch(0.78 0.13 205 / 12%);
   --danger: oklch(0.7 0.17 20);
 
   --card-grad: var(--card);
@@ -75,13 +75,13 @@
   --fs-lg: 20px;
   --fs-xl: 26px;
   --fs-display: clamp(30px, 5vw, 54px);
-  --font: "DM Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --font-display: "Space Grotesk", "DM Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font: "DM Sans", "Segoe UI", system-ui, -apple-system, Roboto, sans-serif;
+  --font-display: "Space Grotesk", "DM Sans", "Segoe UI", system-ui, sans-serif;
 
   /* effects */
   --shadow-1: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-2: 0 16px 42px rgba(0, 0, 0, .5);
-  --glow: 0 22px 55px -30px oklch(0.91 0.17 121 / 55%);
+  --glow: 0 22px 55px -30px oklch(0.80 0.20 148 / 55%);
   --ease: cubic-bezier(.2, .7, .3, 1);
   --header-h: 68px;
   --play-bar-h: 52px;
@@ -105,7 +105,7 @@ body {
   display: flex;
   flex-direction: column;
   background:
-    radial-gradient(1100px 480px at 8% -240px, oklch(0.91 0.17 121 / 7%), transparent 70%),
+    radial-gradient(1100px 480px at 8% -240px, oklch(0.80 0.20 148 / 7%), transparent 70%),
     radial-gradient(900px 520px at 96% -280px, oklch(0.6 0.1 190 / 8%), transparent 72%),
     var(--background);
   background-attachment: fixed;
@@ -123,7 +123,7 @@ img { display: block; max-width: 100%; }
 
 button, input, select { font: inherit; color: inherit; }
 
-::selection { background: oklch(0.91 0.17 121 / 35%); }
+::selection { background: oklch(0.80 0.20 148 / 35%); }
 
 /* 03. Utilities ----------------------------------------------------------- */
 .visually-hidden {
@@ -194,7 +194,7 @@ button, input, select { font: inherit; color: inherit; }
   border-radius: 9px;
   background: var(--primary);
   color: var(--primary-foreground);
-  box-shadow: 0 8px 22px -12px oklch(0.91 0.17 121 / 90%);
+  box-shadow: 0 8px 22px -12px oklch(0.80 0.20 148 / 90%);
 }
 
 .brand-name {
@@ -350,7 +350,7 @@ button, input, select { font: inherit; color: inherit; }
   height: 8px;
   border-radius: 50%;
   background: var(--primary);
-  box-shadow: 0 0 10px oklch(0.91 0.17 121 / 70%);
+  box-shadow: 0 0 10px oklch(0.80 0.20 148 / 70%);
   flex: 0 0 auto;
 }
 
@@ -500,7 +500,7 @@ button, input, select { font: inherit; color: inherit; }
   color: var(--primary-foreground);
   font-weight: 800;
   font-size: 14px;
-  box-shadow: 0 12px 30px -14px oklch(0.91 0.17 121 / 85%);
+  box-shadow: 0 12px 30px -14px oklch(0.80 0.20 148 / 85%);
 }
 
 .hero-skeleton {
@@ -512,7 +512,7 @@ button, input, select { font: inherit; color: inherit; }
 @media (hover: hover) {
   .hero-card:not(.is-skeleton):hover {
     transform: translateY(-4px);
-    border-color: oklch(0.91 0.17 121 / 55%);
+    border-color: oklch(0.80 0.20 148 / 55%);
     box-shadow: var(--shadow-2), var(--glow);
   }
 
@@ -520,7 +520,7 @@ button, input, select { font: inherit; color: inherit; }
 }
 
 .hero-card:focus-visible {
-  border-color: oklch(0.91 0.17 121 / 70%);
+  border-color: oklch(0.80 0.20 148 / 70%);
   box-shadow: var(--shadow-2), var(--glow);
 }
 
@@ -629,7 +629,7 @@ button, input, select { font: inherit; color: inherit; }
 @media (hover: hover) {
   .game-card:not(.is-skeleton):hover {
     transform: translateY(-5px);
-    border-color: oklch(0.91 0.17 121 / 55%);
+    border-color: oklch(0.80 0.20 148 / 55%);
     box-shadow: var(--shadow-2), var(--glow);
   }
 
@@ -639,7 +639,7 @@ button, input, select { font: inherit; color: inherit; }
 
 .game-card:focus-visible {
   transform: translateY(-4px);
-  border-color: oklch(0.91 0.17 121 / 65%);
+  border-color: oklch(0.80 0.20 148 / 65%);
   box-shadow: var(--shadow-2), var(--glow);
 }
 
@@ -675,7 +675,7 @@ button, input, select { font: inherit; color: inherit; }
 
 .badge-local {
   background: var(--local-bg);
-  border: 1px solid oklch(0.78 0.15 155 / 35%);
+  border: 1px solid oklch(0.78 0.13 205 / 35%);
   color: var(--local);
 }
 
@@ -760,7 +760,7 @@ button, input, select { font: inherit; color: inherit; }
 .btn-login {
   background: var(--primary);
   color: var(--primary-foreground);
-  box-shadow: 0 12px 28px -16px oklch(0.91 0.17 121 / 90%);
+  box-shadow: 0 12px 28px -16px oklch(0.80 0.20 148 / 90%);
 }
 
 .btn-primary:hover,
@@ -874,7 +874,7 @@ button, input, select { font: inherit; color: inherit; }
   border: 0;
   border-radius: 0;
   background:
-    radial-gradient(760px 360px at 50% -80px, oklch(0.91 0.17 121 / 8%), transparent 70%),
+    radial-gradient(760px 360px at 50% -80px, oklch(0.80 0.20 148 / 8%), transparent 70%),
     var(--background);
 }
 
@@ -890,7 +890,7 @@ button, input, select { font: inherit; color: inherit; }
   padding: var(--space-6);
   text-align: center;
   background:
-    radial-gradient(760px 360px at 50% -80px, oklch(0.91 0.17 121 / 8%), transparent 70%),
+    radial-gradient(760px 360px at 50% -80px, oklch(0.80 0.20 148 / 8%), transparent 70%),
     var(--background);
 }
 
@@ -1061,7 +1061,7 @@ html.play body {
   padding: 6px 13px;
   border-radius: var(--radius-sm);
   background: oklch(0.145 0.011 195 / 78%);
-  border: 1px solid oklch(0.78 0.15 155 / 40%);
+  border: 1px solid oklch(0.78 0.13 205 / 40%);
   color: var(--local);
   font-size: 12px;
   font-weight: 800;
@@ -1076,7 +1076,7 @@ html.play body {
   height: 7px;
   border-radius: 50%;
   background: var(--local);
-  box-shadow: 0 0 10px oklch(0.78 0.15 155 / 90%);
+  box-shadow: 0 0 10px oklch(0.78 0.13 205 / 90%);
 }
 
 .load-overlay {
@@ -1091,7 +1091,7 @@ html.play body {
   padding: var(--space-6);
   text-align: center;
   background:
-    radial-gradient(760px 360px at 50% -80px, oklch(0.91 0.17 121 / 9%), transparent 70%),
+    radial-gradient(760px 360px at 50% -80px, oklch(0.80 0.20 148 / 9%), transparent 70%),
     oklch(0.1 0.01 195);
   transition: opacity .4s var(--ease), visibility .4s var(--ease);
 }
