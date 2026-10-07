@@ -11,6 +11,8 @@ import { join, relative, sep } from "node:path";
 const MCP_URL = process.env.MCP_URL || "https://mcp.z-chat.men/mcp";
 const TOKEN = process.env.MCP_TOKEN || "";
 
+const VERSION = (process.env.GITHUB_SHA || process.env.ZGAMES_VERSION || String(Date.now())).slice(0, 12);
+
 const SKIP = new Set(["catalog.json"]);
 const BINARY = /\.(png|jpe?g|gif|webp|ico|woff2?|ttf|otf|mp3|mp4|wasm|zip)$/i;
 
@@ -51,7 +53,7 @@ let ok = 0;
 for (const file of files) {
   const rel = relative("site", file).split(sep).join("/");
   const dest = `/srv/zgames/site/${rel}`;
-  const content = readFileSync(file, "utf8");
+  const content = readFileSync(file, "utf8").replaceAll("__V__", VERSION);
   await call("zbox_write_file", { path: dest, content });
   console.log(`→ ${dest} (${Buffer.byteLength(content)} bytes)`);
   ok += 1;
