@@ -1,0 +1,33 @@
+name: Deploy zgames site to the black box
+
+# Pushes the built site/ folder to the box via the zbox MCP (no SSH, no sudo).
+# Requires a repo secret: ZBOX_MCP_TOKEN (the bearer token for mcp.z-chat.men).
+# If the secret is missing the job is a no-op, so pushes never fail for it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+  workflow_dispatch:
+
+concurrency:
+  group: zgames-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push site/ to the box
+        env:
+          MCP_URL: https://mcp.z-chat.men/mcp
+          MCP_TOKEN: ${{ secrets.ZBOX_MCP_TOKEN }}
+        run: |
+          if [ -z "$MCP_TOKEN" ]; then
+            echo "ZBOX_MCP_TOKEN not set — skipping deploy."
+            exit 0
+          fi
+          node deploy/ci/deploy-site.mjs
