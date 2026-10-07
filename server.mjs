@@ -158,7 +158,13 @@ function injectGameShim(html) {
 
 /* Serve a mirrored game file: HTML documents get the SDK shim + isolation
    headers and are sent whole; everything else streams. */
-const JIT_HOSTS = new Set(["games.crazygames.com", "sdk.crazygames.com"]);
+const JIT_HOSTS = new Set([
+  "games.crazygames.com",
+  "sdk.crazygames.com",
+  "watchdocumentaries.com",
+  "magnitudle.com",
+  "www.magnitudle.com",
+]);
 const JIT_HOST_SUFFIXES = [".game-files.crazygames.com", ".files.crazygames.com"];
 const jitInFlight = new Map();
 const jitFailed = new Map();
@@ -208,7 +214,7 @@ async function jitHeal(file) {
       const response = await fetch(url, {
         headers: {
           "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36",
-          Referer: "https://www.crazygames.com/",
+          Referer: `https://${host}/`,
           Accept: "*/*",
         },
         signal: controller.signal,
