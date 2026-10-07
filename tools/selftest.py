@@ -80,7 +80,7 @@ def check_site(base):
 
     def login(s, h, b):
         loc = h.get("Location", "")
-        ok = s == 302 and "supabase.co/auth/v1/oauth/authorize" in loc and "code_challenge=" in loc
+        ok = s == 302 and "/oauth/consent" in loc and "code_challenge=" in loc and "redirect_uri=" in loc
         return ok, "HTTP %s, Location=%s" % (s, loc or "(missing)")
     probe("auth-login", "/auth/login", login, follow=False)
     return checks, playable
@@ -255,6 +255,8 @@ def parse_args(argv=None):
     p.add_argument("--sample", type=int, default=12, help="random playable games (default 12)")
     p.add_argument("--slug", action="append", default=[], metavar="SLUG", help="exact slug (repeatable)")
     p.add_argument("--all", action="store_true", help="test every playable game (slow)")
+    p.add_argument("--shard", type=int, default=0, help="with --all: only test games where index %% shards == shard")
+    p.add_argument("--shards", type=int, default=1, help="with --all: number of parallel shards (default 1)")
     p.add_argument("--wait", type=float, default=12.0, help="seconds per game page (default 12)")
     p.add_argument("--fix", action="store_true",
                    help="auto-heal 404s: fetch missing assets from the original host into the mirror")
@@ -268,7 +270,10 @@ def choose_games(args, playable):
     if args.slug:
         return list(dict.fromkeys(args.slug))
     if args.all:
-        return [str(g.get("slug")) for g in playable]
+        games = [str(g.get("slug")) for g in playable]
+        if args.shards > 1:
+            games = [s for i, s in enumerate(games) if i % args.shards == args.shard]
+        return games
     return [str(g.get("slug")) for g in random.sample(playable, max(0, min(args.sample, len(playable))))]
 
 

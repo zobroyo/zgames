@@ -622,6 +622,25 @@ async function handleApprove(req, res) {
     /* fall through to invalid_token */
   }
   if (!user || !user.id) return send(req, res, 401, json, JSON.stringify({ error: "invalid_token" }));
+  /* Banned in Z Chat = banned in Z Games. Also honour active timeouts. */
+  try {
+    const profileResponse = await fetch(
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=banned,timeout_until`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${match[1]}` } }
+    );
+    if (profileResponse.ok) {
+      const rows = await profileResponse.json();
+      const profile = Array.isArray(rows) ? rows[0] : null;
+      if (profile && profile.banned) {
+        return send(req, res, 403, json, JSON.stringify({ error: "banned" }));
+      }
+      if (profile && profile.timeout_until && Date.parse(profile.timeout_until) > Date.now()) {
+        return send(req, res, 403, json, JSON.stringify({ error: "timed_out", until: profile.timeout_until }));
+      }
+    }
+  } catch {
+    /* fail open if the lookup cannot be made */
+  }
   const raw = await readBody(req);
   let body = null;
   try {

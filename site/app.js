@@ -627,11 +627,7 @@
         go();
       }
 
-      if (modeBadge) {
-        modeBadge.textContent = "Playing locally";
-        modeBadge.className = "mode-badge is-local";
-        modeBadge.hidden = false;
-      }
+      if (modeBadge) modeBadge.hidden = true;
 
       hintTimer = window.setTimeout(function () {
         if (loadSub) loadSub.hidden = false;
