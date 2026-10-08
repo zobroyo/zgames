@@ -166,6 +166,50 @@ Object.defineProperty(window,"PokiSDK",{configurable:true,get:function(){return 
 }catch(e){}
 })();</script>`;
 
+/* Temporary diagnostic shim: only injected when a mirrored document is
+   requested with ?zprobe=1. Records XHR/fetch/errors/progress in
+   window.__zgLog and fakes a WebGL context so headless probes can reach the
+   asset loader (the box has no GPU/software WebGL). Remove after verifying. */
+const PROBE_SHIM = `<script>(function(){
+if(!/[?&]zprobe=1/.test(location.search)){return;}
+var log=[];window.__zgLog=log;
+function L(){var out=[];for(var i=0;i<arguments.length;i++){var x=arguments[i];try{out.push(typeof x==="string"?x:String(JSON.stringify(x)));}catch(e){out.push(String(x));}}log.push(out.join(" | "));if(log.length>800){log.shift();}}
+window.onerror=function(m,s,l,c){L("onerror",String(m).slice(0,240),"@"+String(s||"").slice(0,100)+":"+l+":"+c);};
+try{
+var XO=XMLHttpRequest.prototype.open;
+XMLHttpRequest.prototype.open=function(m,u){var self=this;L("xhr",m,String(u));this.addEventListener("loadend",function(){L("xhr-done",String(u),self.status);});return XO.apply(this,arguments);};
+}catch(e){L("xhr-wrap-fail",e&&e.message);}
+try{
+var F=window.fetch;
+if(F){window.fetch=function(u,o){var s=String((u&&u.url)||u);L("fetch",s);return F.apply(this,arguments).then(function(r){L("fetch-done",s,r.status);return r;},function(e){L("fetch-err",s,String(e&&e.message||e));throw e;});};}
+}catch(e){L("fetch-wrap-fail",e&&e.message);}
+try{
+var GC=HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext=function(t){
+if(t==="webgl"||t==="experimental-webgl"){
+if(this.__zgGL){return this.__zgGL;}
+L("fake-webgl");
+var noop=function(){};
+var obj={canvas:this,drawingBufferWidth:this.width||300,drawingBufferHeight:this.height||150,getError:function(){return 0;},getParameter:function(p){var m={7938:"WebGL 1.0 (zprobe)",7937:"zprobe",7936:"zprobe",35724:"WebGL GLSL ES 1.0 (zprobe)",3379:4096,34076:4096,34921:16,34930:16,35660:16,35661:32,36347:1024,36349:1024,36348:30,34024:4096,3378:new Int32Array([4096,4096])};return Object.prototype.hasOwnProperty.call(m,p)?m[p]:0;},getExtension:function(){return null;},getSupportedExtensions:function(){return [];},getShaderPrecisionFormat:function(){return {rangeMin:127,rangeMax:127,precision:23};},checkFramebufferStatus:function(){return 36053;},getProgramParameter:function(){return true;},getShaderParameter:function(){return true;},getProgramInfoLog:function(){return "";},getShaderInfoLog:function(){return "";},getAttribLocation:function(){return 0;},getUniformLocation:function(){return {};},createShader:function(){return {};},createProgram:function(){return {};},createBuffer:function(){return {};},createTexture:function(){return {};},createFramebuffer:function(){return {};},createRenderbuffer:function(){return {};}};
+this.__zgGL=new Proxy(obj,{get:function(t,p){if(p in t){return t[p];}if(typeof p==="string"&&/^[A-Z0-9_]+$/.test(p)){return 4096;}return noop;}});
+return this.__zgGL;
+}
+return GC.apply(this,arguments);
+};
+}catch(e){L("gl-wrap-fail",e&&e.message);}
+try{
+var iv=setInterval(function(){
+if(window.PokiSDK&&typeof window.PokiSDK.gameLoadingProgress==="function"&&!window.__zgProgressWrapped){
+window.__zgProgressWrapped=1;
+var f=window.PokiSDK.gameLoadingProgress;
+window.PokiSDK.gameLoadingProgress=function(p){L("poki-progress",p);return f.apply(this,arguments);};
+clearInterval(iv);
+}
+},100);
+}catch(e){}
+L("probe-ready");
+})();</script>`;
+
 function injectGameShim(html, probe) {
   const shim = (probe ? PROBE_SHIM : "") + CG_SHIM;
   const head = /<head[^>]*>/i.exec(html);
