@@ -139,7 +139,31 @@ return t[p]!==undefined?t[p]:noop;
 try{Object.defineProperty(facade,"SDK",{configurable:true,get:function(){return sdkProxy;},set:function(v){window.__cgRealSDK=v;}});}catch(e){facade.SDK=sdkProxy;}
 if(!window.CrazySDK){window.CrazySDK=sdk;}
 if(!window.CrazySDK.getInstance){try{window.CrazySDK.getInstance=function(){return sdk;};}catch(e){}}
-try{if(window.localStorage&&!localStorage.getItem("zg_swfix1")){if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<rs.length;i++){try{rs[i].unregister();}catch(e){}}}).catch(noop);}if(window.caches&&caches.keys){caches.keys().then(function(ks){for(var i=0;i<ks.length;i++){try{if(ks[i].indexOf("c3offline")===0&&caches.delete){caches.delete(ks[i]);}}catch(e){}}}).catch(noop);}localStorage.setItem("zg_swfix1","1");}}catch(e){}
+  try{if(window.localStorage&&!localStorage.getItem("zg_swfix1")){if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){navigator.serviceWorker.getRegistrations().then(function(rs){for(var i=0;i<rs.length;i++){try{rs[i].unregister();}catch(e){}}}).catch(noop);}if(window.caches&&caches.keys){caches.keys().then(function(ks){for(var i=0;i<ks.length;i++){try{if(ks[i].indexOf("c3offline")===0&&caches.delete){caches.delete(ks[i]);}}catch(e){}}}).catch(noop);}localStorage.setItem("zg_swfix1","1");}}catch(e){}
+})();</script>
+<script>/* Poki SDK shim: mirrored Poki games wait on PokiSDK.init(), which boots an
+   ad stack from external hosts the mirror CSP blocks - on those builds the
+   promise never settles and the game never leaves its loading screen. Patch
+   the real SDK instance as soon as poki.js assigns it: init + ad breaks
+   resolve immediately, lifecycle calls stay no-ops, everything else intact. */
+(function(){
+var noop=function(){};
+var resolved=function(){return Promise.resolve();};
+var adDone=function(){return Promise.resolve({adFinished:true,rewardedVideoCompleted:true,rewardAllowed:true});};
+var apply=function(sdk){
+if(!sdk||typeof sdk!=="object"){return sdk;}
+try{
+if(typeof sdk.init==="function"){sdk.init=resolved;}
+if(typeof sdk.initWithVideoHB==="function"){sdk.initWithVideoHB=resolved;}
+if(typeof sdk.commercialBreak==="function"){sdk.commercialBreak=adDone;}
+if(typeof sdk.rewardedBreak==="function"){sdk.rewardedBreak=function(){return Promise.resolve(true);};}
+["gameLoadingStart","gameLoadingProgress","gameLoadingFinished","gameplayStart","gameplayStop","gameInteractive","happyTime","muteAd","setPlayerAge","setDebug","roundStart","roundEnd","customEvent","sendHighscore","logError"].forEach(function(k){if(typeof sdk[k]!=="function"){sdk[k]=noop;}});
+}catch(e){}
+return sdk;
+};
+try{
+Object.defineProperty(window,"PokiSDK",{configurable:true,get:function(){return window.__pokiReal||null;},set:function(v){window.__pokiReal=apply(v);}});
+}catch(e){}
 })();</script>`;
 
 function injectGameShim(html) {
