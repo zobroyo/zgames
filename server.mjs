@@ -339,7 +339,7 @@ async function serveMirrorFile(req, res, file, cacheControl) {
     if (data.length > 4 * 1024 * 1024) {
       return streamFile(req, res, file, cacheControl, { ...MIRROR_ASSET_HEADERS, ...ISOLATION_HEADERS });
     }
-    const html = injectGameShim(data.toString("utf8"));
+    const html = injectGameShim(data.toString("utf8"), /[?&]zprobe=1/.test(req.url || ""));
     return send(req, res, 200, {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-cache",
