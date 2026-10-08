@@ -166,18 +166,19 @@ Object.defineProperty(window,"PokiSDK",{configurable:true,get:function(){return 
 }catch(e){}
 })();</script>`;
 
-function injectGameShim(html) {
+function injectGameShim(html, probe) {
+  const shim = (probe ? PROBE_SHIM : "") + CG_SHIM;
   const head = /<head[^>]*>/i.exec(html);
   if (head) {
     const at = head.index + head[0].length;
-    return html.slice(0, at) + CG_SHIM + html.slice(at);
+    return html.slice(0, at) + shim + html.slice(at);
   }
   const root = /<html[^>]*>/i.exec(html);
   if (root) {
     const at = root.index + root[0].length;
-    return html.slice(0, at) + CG_SHIM + html.slice(at);
+    return html.slice(0, at) + shim + html.slice(at);
   }
-  return CG_SHIM + html;
+  return shim + html;
 }
 
 /* Serve a mirrored game file: HTML documents get the SDK shim + isolation
