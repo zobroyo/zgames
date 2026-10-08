@@ -41,6 +41,7 @@ const DATA_DIR = process.env.POLYMP_DATA_DIR || "/srv/zgames/state/polymp";
 const PUBLIC_PATH = (process.env.POLYMP_PUBLIC_PATH || "/polymp").replace(/\/+$/, "");
 const DEFAULT_MIRROR = "/srv/zgames/mirror/h/polytrack.game-files.crazygames.com/polytrack/16";
 const MIRROR_ROOT = process.env.POLYMP_MIRROR_ROOT || DEFAULT_MIRROR;
+const ZGAMES_ROOT = process.env.POLYMP_ZGAMES_ROOT || "/srv/zgames";
 const CLIENT_JS = path.join(__dirname, "polytrack-mp.js");
 const BOARD_FILE = path.join(DATA_DIR, "leaderboard.json");
 const PROFILE_FILE = path.join(DATA_DIR, "profiles.json");
@@ -642,8 +643,30 @@ function permissiveCsp() {
   ].join("; ");
 }
 
+/* Harness-only CrazyGames facade: mirrors what server.mjs injects into mirrored
+   documents so the self-contained /game/ copy behaves like the portal. */
+const HARNESS_CG_SHIM = `<script>(function(){
+var noop=function(){},res=function(){return Promise.resolve();};
+var adReq=function(t,cb){var c=null;if(cb&&typeof cb==="object"){c=cb;}else if(t&&typeof t==="object"){c=t;}
+try{if(c&&c.adStarted)c.adStarted();}catch(e){}
+return Promise.resolve().then(function(){try{if(c&&c.adFinished)c.adFinished();}catch(e){}return {adFinished:true};});};
+var sdk={init:res,game:{loadingStart:noop,loadingStop:noop,gameplayStart:noop,gameplayStop:noop,happytime:noop,sdkLoadingStart:noop,sdkLoadingStop:noop,setGameContext:noop,inviteLink:function(){return"";},getInviteLink:res,showInviteButton:noop},
+ad:{requestAd:adReq,requestBanner:adReq,requestResponsiveBanner:adReq,hasAdblock:function(){return Promise.resolve(false);}},
+data:{getItem:function(k){try{return localStorage.getItem("cg_"+k);}catch(e){return null;}},setItem:function(k,v){try{localStorage.setItem("cg_"+k,v);}catch(e){}},removeItem:function(k){try{localStorage.removeItem("cg_"+k);}catch(e){}},clear:noop},
+user:{isUserAccountAvailable:false,getUser:function(){return Promise.resolve(null);},getToken:function(){return Promise.resolve(null);},showAuthPrompt:res},environment:"crazygames",banner:{requestBanner:adReq,requestResponsiveBanner:adReq}};
+var facade={};
+try{Object.defineProperty(window,"CrazyGames",{configurable:true,get:function(){return facade;},set:function(v){window.__cgReal=v;if(v&&v.SDK){window.__cgRealSDK=v.SDK;}}});}catch(e){window.CrazyGames=facade;}
+var sdkProxy=new Proxy(sdk,{get:function(t,p){
+if(p==="init"){return function(){try{var r=window.__cgRealSDK;if(r&&typeof r.init==="function"){var q=r.init();if(q&&q.then)q.catch(noop);}}catch(e){}return Promise.resolve();};}
+if(p==="ad")return t.ad; if(p==="banner")return t.banner;
+var real=null;try{real=window.__cgRealSDK?window.__cgRealSDK[p]:null;}catch(e){}
+if(typeof real!=="undefined"&&real!==null&&typeof real!=="object")return real;
+return t[p]!==undefined?t[p]:noop;}});
+try{Object.defineProperty(facade,"SDK",{configurable:true,get:function(){return sdkProxy;},set:function(v){window.__cgRealSDK=v;}});}catch(e){facade.SDK=sdkProxy;}
+})();</script>`;
+
 function injectMpShim(html) {
-  const tag = `<script src="${PUBLIC_PATH}/polytrack-mp.js"></script>`;
+  const tag = `${HARNESS_CG_SHIM}<script src="${PUBLIC_PATH}/polytrack-mp.js"></script>`;
   const head = /<head[^>]*>/i.exec(html);
   if (head) {
     const at = head.index + head[0].length;
@@ -652,18 +675,19 @@ function injectMpShim(html) {
   return tag + html;
 }
 
-async function serveGameFile(req, res, url) {
-  let rel = decodeURIComponent(url.pathname.replace(/^\/game\/?/, ""));
-  if (!rel) rel = "index.html";
-  const file = path.join(MIRROR_ROOT, rel);
-  const rootResolved = path.resolve(MIRROR_ROOT);
-  const resolved = path.resolve(file);
+async function serveStaticTree(req, res, url, prefix, root) {
+  let rel = decodeURIComponent(url.pathname.slice(prefix.length));
+  if (!rel || rel.endsWith("/")) rel += "index.html";
+  const rootResolved = path.resolve(root);
+  const resolved = path.resolve(path.join(root, rel));
   if (resolved !== rootResolved && !resolved.startsWith(rootResolved + path.sep)) {
     return send(res, 403, { "Content-Type": "text/plain" }, "forbidden");
   }
   let st;
   try { st = await fsp.stat(resolved); } catch { return send(res, 404, { "Content-Type": "text/plain" }, "not found"); }
-  if (st.isDirectory()) return serveGameFile(req, res, { pathname: url.pathname.replace(/\/?$/, "/index.html") });
+  if (st.isDirectory()) {
+    return serveStaticTree(req, res, { pathname: url.pathname.replace(/\/?$/, "/index.html") }, prefix, root);
+  }
   const ext = path.extname(resolved).toLowerCase();
   const headers = {
     "Content-Type": MIME[ext] || "application/octet-stream",
@@ -678,6 +702,10 @@ async function serveGameFile(req, res, url) {
     return send(res, 200, headers, injectMpShim(html));
   }
   return send(res, 200, headers, await fsp.readFile(resolved));
+}
+
+async function serveGameFile(req, res, url) {
+  return serveStaticTree(req, res, url, "/game/", MIRROR_ROOT);
 }
 
 /* ------------------------------------------------------------------ */
@@ -702,6 +730,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/game" || url.pathname.startsWith("/game/")) {
       return await serveGameFile(req, res, url);
+    }
+    if (url.pathname.startsWith("/mirror/")) {
+      return await serveStaticTree(req, res, url, "/mirror/", path.join(ZGAMES_ROOT, "mirror"));
     }
     return send(res, 404, { "Content-Type": "text/plain" }, "not found");
   } catch (e) {
