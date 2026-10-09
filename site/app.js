@@ -29,9 +29,24 @@
       credentials: "same-origin",
       headers: { Accept: "application/json" }
     }).then(function (res) {
-      if (!res.ok) throw new Error(url + " responded " + res.status);
+      if (!res.ok) {
+        var err = new Error(url + " responded " + res.status);
+        err.status = res.status;
+        throw err;
+      }
       return res.json();
     });
+  }
+
+  /* The catalog is auth-gated server-side; when a scanner loads /play with
+     ?zgtest=... the page must pass that token through or the lookup 401s. */
+  function catalogURL() {
+    var match = /[?&]zgtest=([^&]+)/.exec(window.location.search);
+    return "/api/catalog" + (match ? "?zgtest=" + match[1] : "");
+  }
+
+  function isAuthError(err) {
+    return !!err && err.status === 401;
   }
 
   function isLocalStatus(status) {
@@ -57,8 +72,26 @@
       .join(" ");
   }
 
+  /* Many mirrored catalogs carry the wrapper page title ("... Game Files |
+     CrazyGames.com", "Cocos Creator | build-name"). Strip that chrome so the
+     grid and hero show the game's real name; fall back to the slug. */
+  function sanitizeTitle(raw, slug) {
+    var title = String(raw || "");
+    if (/^cocos creator\s*\|/i.test(title)) title = titleCaseSlug(slug);
+    title = title
+      .replace(/\s*[|\-\u2013\u2014]\s*A game on CrazyGames.*$/i, "")
+      .replace(/\s*[|\-\u2013\u2014]\s*CrazyGames(?:\.com)?\s*$/i, "")
+      .replace(/\s*[|\-\u2013\u2014]\s*Crazy Games\s*$/i, "")
+      .replace(/\s+Game Files\s*$/i, "")
+      .replace(/\s+HTML5\s*$/i, "")
+      .replace(/\s*[|\-\u2013\u2014]\s*$/, "")
+      .trim();
+    if (title.length < 3 || /crazygames/i.test(title)) title = titleCaseSlug(slug);
+    return title;
+  }
+
   function gameTitle(game) {
-    return game && game.title ? String(game.title) : titleCaseSlug(game && game.slug);
+    return sanitizeTitle(game && game.title ? game.title : "", game && game.slug);
   }
 
   function initialOf(text) {
@@ -299,8 +332,10 @@
     var allGames = [];
     var catalogTotal = 0;
     var query = "";
-    var sortMode = sortSelect && sortSelect.value ? sortSelect.value : "recent";
+    var sortMode = sortSelect && sortSelect.value ? sortSelect.value : "recommended";
     var randomRanks = {};
+    var recRanks = {};
+    var recGames = [];
     var heroReady = false;
     var heroIndex = 0;
     var heroTimer = 0;
@@ -334,6 +369,14 @@
           var ar = randomRanks.hasOwnProperty(a.slug) ? randomRanks[a.slug] : 0;
           var br = randomRanks.hasOwnProperty(b.slug) ? randomRanks[b.slug] : 0;
           return ar - br;
+        };
+      }
+      if (sortMode === "recommended") {
+        return function (a, b) {
+          var ar = recRanks.hasOwnProperty(a.slug) ? recRanks[a.slug] : Number.MAX_SAFE_INTEGER;
+          var br = recRanks.hasOwnProperty(b.slug) ? recRanks[b.slug] : Number.MAX_SAFE_INTEGER;
+          if (ar !== br) return ar - br;
+          return byRecent(a, b);
         };
       }
       return byRecent;
@@ -399,7 +442,9 @@
       if (!hero || !heroTrack) return;
       stopHeroAuto();
       clear(heroTrack);
-      var featured = allGames.slice().sort(byRecent).slice(0, HERO_COUNT);
+      /* Server-ranked picks (quality + popularity + recency, genre-spread)
+         lead the hero; fall back to newest if the box sent no ranking. */
+      var featured = recGames.length ? recGames.slice(0, HERO_COUNT) : allGames.slice().sort(byRecent).slice(0, HERO_COUNT);
       if (!featured.length) {
         hero.hidden = true;
         return;
@@ -493,7 +538,7 @@
         countLabel.classList.add("is-syncing");
       }
 
-      fetchJSON("/api/catalog").then(function (data) {
+      fetchJSON(catalogURL()).then(function (data) {
         var games = data && Array.isArray(data.games) ? data.games : [];
         catalogTotal = games.length;
         allGames = [];
@@ -504,12 +549,27 @@
             allGames.push(game);
           }
         }
+        var bySlug = {};
+        for (var j = 0; j < allGames.length; j++) bySlug[allGames[j].slug] = allGames[j];
+        var recs = data && Array.isArray(data.recs) ? data.recs : [];
+        recRanks = {};
+        recGames = [];
+        for (var k = 0; k < recs.length; k++) {
+          var pick = bySlug[recs[k]];
+          if (!pick || recRanks.hasOwnProperty(pick.slug)) continue;
+          recRanks[pick.slug] = k;
+          recGames.push(pick);
+        }
         randomRanks = shuffleRanks(allGames);
         heroReady = true;
         setStatus("");
         renderHero();
         render();
-      }).catch(function () {
+      }).catch(function (err) {
+        if (isAuthError(err)) {
+          window.location.replace("/auth/login?next=%2F");
+          return;
+        }
         heroReady = false;
         stopHeroAuto();
         if (hero) {
@@ -618,7 +678,15 @@
 
       frame.title = currentTitle + " \u2014 Z Games";
       frame.addEventListener("load", onLoaded, { once: true });
-      var go = function () { frame.src = src; };
+      /* Diagnostics: ?zprobe=1 on the play page carries into the mirrored
+         document so the server can inject the request/progress probe. */
+      var go = function () {
+        if (/[?&]zprobe=1\b/.test(window.location.search)) {
+          frame.src = src + (src.indexOf("?") === -1 ? "?zprobe=1" : "&zprobe=1");
+        } else {
+          frame.src = src;
+        }
+      };
       /* wait for stale service-worker cleanup (play.html) so the old worker
          can never serve a cached broken build to this navigation */
       if (window.__zgSwCleanup && typeof window.__zgSwCleanup.then === "function") {
@@ -655,7 +723,7 @@
     }
 
     function loadCatalog() {
-      fetchJSON("/api/catalog").then(function (data) {
+      fetchJSON(catalogURL()).then(function (data) {
         var games = data && Array.isArray(data.games) ? data.games : [];
         var game = null;
         for (var i = 0; i < games.length; i++) {
@@ -672,7 +740,13 @@
         if (loadError) loadError.hidden = true;
         showOverlay();
         setFrame(game.entry);
-      }).catch(showLoadError);
+      }).catch(function (err) {
+        if (isAuthError(err)) {
+          window.location.replace("/auth/login?next=" + encodeURIComponent("/play/" + slug));
+          return;
+        }
+        showLoadError();
+      });
     }
 
     if (retryBtn) {

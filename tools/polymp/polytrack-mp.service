@@ -1,0 +1,25 @@
+[Unit]
+Description=PolyTrack multiplayer relay (Z Games) - signaling + leaderboard + /game/ harness
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=zchat
+Group=zchat
+WorkingDirectory=/srv/zgames/tools/polymp
+Environment=POLYMP_PORT=8795
+Environment=POLYMP_HOST=127.0.0.1
+Environment=POLYMP_DATA_DIR=/srv/zgames/state/polymp
+Environment=POLYMP_MIRROR_ROOT=/srv/zgames/mirror/h/polytrack.game-files.crazygames.com/polytrack/16
+Environment=POLYMP_ZGAMES_ROOT=/srv/zgames
+ExecStart=/usr/bin/node /srv/zgames/tools/polymp/relay.mjs
+Restart=always
+RestartSec=2
+
+# hardening (relay only needs the mirror read-only and its state dir)
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

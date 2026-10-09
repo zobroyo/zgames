@@ -1,8 +1,9 @@
 ﻿import http from "node:http";
-import { createReadStream } from "node:fs";
+import { createReadStream, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 
 /* Config */
 
@@ -75,10 +76,17 @@ const MIME = {
 
 const mimeFor = (file) => MIME[path.extname(file).toLowerCase()] || "application/octet-stream";
 
+/* Only Z Chat family sites may frame Z Games pages (the Z Chat hub embeds
+   them full-viewport). CSP host wildcards match subdomains only, so the apex
+   and www are listed explicitly next to https://*.z-chat.men, which also
+   covers the rotating d-<hash>.z-chat.men tunnel hostnames. */
+const FRAME_ANCESTORS =
+  "frame-ancestors 'self' https://z-chat.men https://www.z-chat.men https://*.z-chat.men";
+
 /* CSP applied to all mirrored game content and fallback-served assets:
    blocks any third-party interaction (external CDNs, crazygames.com, etc.). */
 const MIRROR_CSP =
-  "default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'self'; object-src 'none'; base-uri 'none'";
+  `default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' data: blob:; worker-src 'self' blob:; ${FRAME_ANCESTORS}; object-src 'none'; base-uri 'none'`;
 
 const MIRROR_CACHE = "public, max-age=600";
 
@@ -210,8 +218,28 @@ clearInterval(iv);
 L("probe-ready");
 })();</script>`;
 
+/* Localizer for the Crossy Road upsell CDN (hipster-whale). The asset loader
+   issues plain XHRs to s3-eu-west-1.amazonaws.com; the mirror CSP blocks the
+   host, the XHR fires onerror, and the loader's error handler throws inside
+   the pending-asset callback so its progress never reaches 100%. Rewriting
+   those URLs to the local mirror keeps the upsell (and the boot counter)
+   self-hosted. Only this one host/path pair is touched. */
+const ZG_LOCALIZE_SHIM = `<script>(function(){
+var HOST="s3-eu-west-1.amazonaws.com/hipster-whale/";
+var PREFIX="/mirror/h/s3-eu-west-1.amazonaws.com/hipster-whale/";
+var loc=function(u){
+if(typeof u!=="string"){return u;}
+var i=u.indexOf(HOST);
+if(i===-1){return u;}
+return PREFIX+u.slice(i+HOST.length).split("?")[0].split("#")[0];
+};
+try{var XO=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{arguments[1]=loc(u);}catch(e){}return XO.apply(this,arguments);};}catch(e){}
+try{if(window.fetch){var F=window.fetch;window.fetch=function(u,o){try{if(typeof u==="string"){u=loc(u);}else if(u&&u.url){u=new Request(loc(u.url),u);}}catch(e){}return F.call(this,u,o);};}}catch(e){}
+try{var d=Object.getOwnPropertyDescriptor(HTMLImageElement.prototype,"src");if(d&&d.set){Object.defineProperty(HTMLImageElement.prototype,"src",{configurable:true,get:d.get,set:function(v){try{v=loc(v);}catch(e){}return d.set.call(this,v);}});}}catch(e){}
+})();</script>`;
+
 function injectGameShim(html, probe) {
-  const shim = (probe ? PROBE_SHIM : "") + CG_SHIM;
+  const shim = (probe ? PROBE_SHIM : "") + ZG_LOCALIZE_SHIM + CG_SHIM;
   const head = /<head[^>]*>/i.exec(html);
   if (head) {
     const at = head.index + head[0].length;
@@ -225,6 +253,43 @@ function injectGameShim(html, probe) {
   return shim + html;
 }
 
+/* ---- PolyTrack MP relay wiring: relay = polytrack-mp.service on 127.0.0.1:8795 ---- */
+const POLYMP_UPSTREAM = new URL("http://127.0.0.1:8795");
+const POLYMP_SCRIPT_TAG = '<script src="/polymp/polytrack-mp.js"></script>';
+
+function proxyPolymp(req, res) {
+  const up = http.request(
+    {
+      host: POLYMP_UPSTREAM.hostname,
+      port: POLYMP_UPSTREAM.port,
+      method: req.method,
+      path: req.url,
+      headers: { ...req.headers, host: POLYMP_UPSTREAM.host },
+    },
+    (upRes) => {
+      res.writeHead(upRes.statusCode || 502, upRes.headers);
+      upRes.pipe(res);
+    },
+  );
+  up.on("error", () => {
+    try {
+      send(req, res, 502, { "Content-Type": "text/plain; charset=utf-8" }, "polymp relay unavailable");
+    } catch {
+      /* response already started */
+    }
+  });
+  req.pipe(up);
+}
+
+function injectPolytrackMp(html) {
+  const head = /<head[^>]*>/i.exec(html);
+  if (head) {
+    const at = head.index + head[0].length;
+    return html.slice(0, at) + POLYMP_SCRIPT_TAG + html.slice(at);
+  }
+  return POLYMP_SCRIPT_TAG + html;
+}
+
 /* Serve a mirrored game file: HTML documents get the SDK shim + isolation
    headers and are sent whole; everything else streams. */
 const JIT_HOSTS = new Set([
@@ -233,6 +298,9 @@ const JIT_HOSTS = new Set([
   "watchdocumentaries.com",
   "magnitudle.com",
   "www.magnitudle.com",
+  /* Crossy Road's upsell splash pulls artwork/text from this bucket. The
+     localizer shim below rewrites those URLs onto this host path. */
+  "s3-eu-west-1.amazonaws.com",
 ]);
 const JIT_HOST_SUFFIXES = [".game-files.crazygames.com", ".files.crazygames.com"];
 const jitInFlight = new Map();
@@ -339,7 +407,8 @@ async function serveMirrorFile(req, res, file, cacheControl) {
     if (data.length > 4 * 1024 * 1024) {
       return streamFile(req, res, file, cacheControl, { ...MIRROR_ASSET_HEADERS, ...ISOLATION_HEADERS });
     }
-    const html = injectGameShim(data.toString("utf8"), /[?&]zprobe=1/.test(req.url || ""));
+    let html = injectGameShim(data.toString("utf8"), /[?&]zprobe=1/.test(req.url || ""));
+    if (/polytrack/i.test(file)) html = injectPolytrackMp(html);
     return send(req, res, 200, {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-cache",
@@ -598,6 +667,28 @@ async function resolveMirrorAsset(req, pathname) {
   return null;
 }
 
+/* Some mirrored builds ask for model JSONs that never existed upstream (the
+   origin serves 404 HTML for them). Their asset loader JSON.parses every XHR
+   response inside the completion callback, so a 404 body throws there and the
+   boot progress freezes forever. Answer those requests with an empty model
+   set so the loader can finish; unknown-world entities are simply absent. */
+const EMPTY_MODEL_JSON = '{"models":{}}';
+function mirrorJsonStub(file) {
+  const abs = path.resolve(file);
+  const rel = path.relative(MIRROR_DIR, abs).split(path.sep).join("/");
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  /* Any model JSON under crossy-road/models/ that is missing upstream (only
+     common-world.json actually exists there) gets an empty, parseable model
+     set: space-world.json, space-char.json, dinosaur-world.json, ... */
+  if (!/\/wp-content\/uploads\/games\/crossy-road\/models\/[^/]+\.json$/.test(rel)) return null;
+  try {
+    if (statSync(abs).isFile()) return null;
+  } catch {
+    /* not on disk - serve the stub */
+  }
+  return EMPTY_MODEL_JSON;
+}
+
 async function streamFile(req, res, file, cacheControl, extraHeaders) {
   let stat;
   try {
@@ -610,6 +701,14 @@ async function streamFile(req, res, file, cacheControl, extraHeaders) {
         return notFound(req, res);
       }
     } else {
+      const stub = mirrorJsonStub(file);
+      if (stub) {
+        return send(req, res, 200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": cacheControl || "public, max-age=600",
+          ...(extraHeaders || {}),
+        }, stub);
+      }
       return notFound(req, res);
     }
   }
@@ -685,8 +784,8 @@ function authFail(req, res, status, message) {
     req,
     res,
     status,
-    { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
-    `<!doctype html><html><head><meta charset="utf-8"><title>Sign-in failed</title></head><body><p>${safe}</p><p><a href="/">Back to Z Games</a></p></body></html>`
+    { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": FRAME_ANCESTORS },
+    `<!doctype html><html><head><meta charset="utf-8"><title>Sign-in failed</title></head><body><p>${safe}</p><p><a href="/">Back to Z Portal</a></p></body></html>`
   );
 }
 
@@ -728,24 +827,38 @@ async function handleApprove(req, res) {
     /* fall through to invalid_token */
   }
   if (!user || !user.id) return send(req, res, 401, json, JSON.stringify({ error: "invalid_token" }));
-  /* Banned in Z Chat = banned in Z Games. Also honour active timeouts. */
+  /* Banned in Z Chat = banned in Z Games. Also honour active timeouts, and
+     require an approved Z Chat application: status is checked here so a
+     pending/rejected Google signup can never mint a Z Games session. */
+  let profile = null;
   try {
     const profileResponse = await fetch(
-      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=banned,timeout_until`,
+      `${SUPABASE_URL}/rest/v1/profiles?id=eq.${encodeURIComponent(user.id)}&select=banned,timeout_until,application_status`,
       { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${match[1]}` } }
     );
-    if (profileResponse.ok) {
-      const rows = await profileResponse.json();
-      const profile = Array.isArray(rows) ? rows[0] : null;
-      if (profile && profile.banned) {
-        return send(req, res, 403, json, JSON.stringify({ error: "banned" }));
-      }
-      if (profile && profile.timeout_until && Date.parse(profile.timeout_until) > Date.now()) {
-        return send(req, res, 403, json, JSON.stringify({ error: "timed_out", until: profile.timeout_until }));
-      }
+    if (!profileResponse.ok) {
+      /* Status cannot be verified - refuse rather than risk letting a pending
+         account through during a Supabase REST hiccup. */
+      return send(req, res, 503, json, JSON.stringify({ error: "profile_unavailable" }));
     }
+    const rows = await profileResponse.json();
+    profile = Array.isArray(rows) ? rows[0] : null;
   } catch {
-    /* fail open if the lookup cannot be made */
+    return send(req, res, 503, json, JSON.stringify({ error: "profile_unavailable" }));
+  }
+  if (!profile) {
+    /* The signup trigger always creates a profile row; a missing row means the
+       account never completed signup, so treat it like a pending application. */
+    return send(req, res, 403, json, JSON.stringify({ error: "pending_application" }));
+  }
+  if (profile.banned) {
+    return send(req, res, 403, json, JSON.stringify({ error: "banned" }));
+  }
+  if (profile.timeout_until && Date.parse(profile.timeout_until) > Date.now()) {
+    return send(req, res, 403, json, JSON.stringify({ error: "timed_out", until: profile.timeout_until }));
+  }
+  if (profile.application_status !== "approved") {
+    return send(req, res, 403, json, JSON.stringify({ error: "pending_application" }));
   }
   const raw = await readBody(req);
   let body = null;
@@ -772,6 +885,7 @@ async function handleApprove(req, res) {
     name: user.name,
     avatar: user.avatar,
     challenge,
+    appr: true,
   });
   const redirect =
     redirectUri + "?code=" + encodeURIComponent(code) + "&state=" + encodeURIComponent(state);
@@ -790,11 +904,19 @@ async function handleCallback(req, res, url) {
   if (!cookies.zg_verifier) return authFail(req, res, 400, "Missing PKCE verifier - please try signing in again.");
   const data = verifyAuthCode(code);
   if (!data) return authFail(req, res, 400, "This sign-in link is invalid or expired. Please try again.");
+  if (data.appr !== true) {
+    return authFail(
+      req,
+      res,
+      403,
+      "Your Z Chat application is still being reviewed. You can sign in once an admin approves it."
+    );
+  }
   const challenge = b64url(crypto.createHash("sha256").update(cookies.zg_verifier).digest());
   if (!data.challenge || !safeEqual(challenge, data.challenge)) {
     return authFail(req, res, 403, "Could not verify the sign-in request. Please try again.");
   }
-  const user = { id: data.sub, email: data.email, name: data.name, avatar: data.avatar };
+  const user = { id: data.sub, email: data.email, name: data.name, avatar: data.avatar, appr: true };
   if (!user.id) return authFail(req, res, 400, "Could not read your account details.");
   let next = "/";
   try {
@@ -839,10 +961,13 @@ function isTrustedLocal(req) {
 }
 
 /* Auth shared by the play gate and the saves API: a verified session cookie is
-   a real user; trusted-local tooling and the zgtest token are guests. */
+   a real user; trusted-local tooling and the zgtest token are guests. Sessions
+   only carry `appr` when they were minted through the approve endpoint after
+   the account's application_status was verified; anything else falls through
+   to the login flow (pending accounts cannot reach /play with a stale cookie). */
 function requestAuth(req, url) {
   const session = verifySession(parseCookies(req).zg_session);
-  if (session && session.id) return { user: session };
+  if (session && session.id && session.appr === true) return { user: session };
   const testToken = process.env.ZGAMES_TEST_TOKEN || "";
   if (testToken && url.searchParams.get("zgtest") === testToken) return { guest: "test" };
   if (isTrustedLocal(req)) return { guest: "local" };
@@ -944,6 +1069,273 @@ async function handleSavePut(req, res, userId, slug) {
   });
 }
 
+/* Recommendations
+   ---------------
+   The catalog has no genre field, so the first 12 picks are scored from
+   signals that already live on the box and then spread across genres:
+
+     score = quality + scan + popularity + recency + size + cover + jitter
+
+     quality     status "ok" (+20) vs "partial" (+6)
+     scan        blackscan "ok" (+15) / "slow-boot" (+10) / unscanned (+6);
+                 "broken", "no-iframe" and brokengames.txt slugs are dropped
+     popularity  log2(1 + public /play hits over 14 days, cfip only) * 6
+                 (seeded from journalctl at boot, live-counted after that)
+     recency     10 * exp(-age_days / 14) using catalog updatedAt
+     size        +4 under 8 MB (fast first paint), -8 over 50 MB
+     cover       -25 when /covers/<slug>.png is missing (broken thumbnail)
+     title       -10 when the catalog title is wrapper chrome ("... Game Files
+                 | CrazyGames.com", "Cocos Creator | build"), which the client
+                 also strips for display
+     jitter      (fnv1a(slug|YYYY-MM-DD) % 100) / 100 * 6 so picks rotate
+                 once a day while staying stable within a day
+
+   Picks are then selected in two passes: best scorers from distinct genres
+   first (diversity), then the next best fill the rest. The client renders the
+   first HERO_COUNT picks as the hero row and uses the full 12 as the default
+   "Recommended" grid order; the plain catalog order is untouched. */
+
+const RECS_COUNT = 12;
+const PLAYS_WINDOW_DAYS = 14;
+const STATE_FROZEN = path.join(STATE_DIR, "frozen.jsonl");
+const STATE_BROKEN = path.join(STATE_DIR, "brokengames.txt");
+
+const playCounts = new Map();
+let playTick = 0;
+
+/* Seed popularity from the public play log: only real (cfip-bearing) 200s,
+   never local tooling or ?zgtest verification hits. Best-effort - if the
+   journal is unreadable the server simply starts with live counts only. */
+function bootstrapPopularity() {
+  let child;
+  try {
+    child = spawn(
+      "journalctl",
+      ["-u", "zgames", "--since", `${PLAYS_WINDOW_DAYS} days ago`, "--no-pager", "-o", "cat"],
+      { stdio: ["ignore", "pipe", "ignore"] }
+    );
+  } catch {
+    return;
+  }
+  let buf = "";
+  const timer = setTimeout(() => {
+    try {
+      child.kill("SIGKILL");
+    } catch {}
+  }, 15000);
+  child.stdout.on("data", (chunk) => {
+    if (buf.length < 32 * 1024 * 1024) buf += chunk.toString("utf8");
+  });
+  child.on("error", () => {});
+  child.on("close", () => {
+    clearTimeout(timer);
+    const re = /\[req\] GET \/play\/([a-z0-9-]{1,64})[^ ]* -> 200\b/;
+    for (const line of buf.split("\n")) {
+      if (!line.includes("cfip=") || line.includes("zgtest")) continue;
+      const match = re.exec(line);
+      if (match) playCounts.set(match[1], (playCounts.get(match[1]) || 0) + 1);
+    }
+    if (playCounts.size) {
+      console.log(`[recs] seeded popularity for ${playCounts.size} game(s) from journalctl`);
+    }
+  });
+}
+
+function notePlay(slug, req, url) {
+  if (!slug || !/^[a-z0-9-]{1,64}$/.test(slug)) return;
+  if (!req.headers["cf-connecting-ip"]) return;
+  try {
+    if (url.searchParams.get("zgtest")) return;
+  } catch {}
+  playCounts.set(slug, Math.min(100000, (playCounts.get(slug) || 0) + 1));
+  playTick += 1;
+}
+
+const BAD_SCAN = new Set(["broken", "no-iframe", "frozen"]);
+let scanState = { at: 0, frozen: new Map(), broken: new Set() };
+
+async function loadScanState() {
+  if (scanState.at && Date.now() - scanState.at < 60 * 1000) return scanState;
+  const frozen = new Map();
+  const broken = new Set();
+  try {
+    const [rawFrozen, rawBroken] = await Promise.all([
+      fs.readFile(STATE_FROZEN, "utf8").catch(() => ""),
+      fs.readFile(STATE_BROKEN, "utf8").catch(() => ""),
+    ]);
+    for (const line of rawFrozen.split("\n")) {
+      const text = line.trim();
+      if (!text) continue;
+      try {
+        const row = JSON.parse(text);
+        if (row && typeof row.slug === "string" && typeof row.status === "string") {
+          frozen.set(row.slug, row.status); /* append-only: last scan wins */
+        }
+      } catch {}
+    }
+    for (const line of rawBroken.split("\n")) {
+      const slug = line.trim();
+      if (slug) broken.add(slug);
+    }
+  } catch {}
+  scanState = { at: Date.now(), frozen, broken };
+  return scanState;
+}
+
+let coverState = { at: 0, set: new Set() };
+async function loadCovers() {
+  if (coverState.at && Date.now() - coverState.at < 10 * 60 * 1000) return coverState.set;
+  const set = new Set();
+  try {
+    const entries = await fs.readdir(path.join(ROOT, "covers"));
+    for (const name of entries) {
+      if (name.toLowerCase().endsWith(".png")) set.add(name.slice(0, -4));
+    }
+  } catch {}
+  coverState = { at: Date.now(), set };
+  return set;
+}
+
+/* Genre guess from slug/title keywords; order matters (first match wins). */
+const GENRE_RULES = [
+  ["racing", /(race|racing|kart|moto|drift|speed|stunt|traffic|taxi|parking|highway|rally|driver|truck|bike|car-|car$|x3m|trial|mountain)/],
+  ["sports", /(soccer|football|basket|golf|tennis|hockey|pool|bowling|cricket|rugby|volleyball|boxing|skate|surf|snowboard|olympic|billiard|penalty|kick)/],
+  ["shooter", /(shooter|shooting|gun|sniper|zombie|strike|combat|tank|alien|invader|warfare|battlefield|duel|hunter)/],
+  ["strategy", /(tower|defense|defence|\btd\b|empire|kingdom|clash|builder|tycoon|idle|clicker|management|farm|war|command|colon|settler|civil)/],
+  ["puzzle", /(puzzle|match|block|tetris|sudoku|mahjong|2048|merge|word|quiz|trivia|bubble|tile|escape|brain|logic|connect|solitaire|jigsaw|hidden|find|sort|color|colour|stack)/],
+  ["adventure", /(adventure|rpg|dungeon|quest|platform|runner|running|jump|ninja|mario|hero|slayer|digger|mining|mine|craft|pixel|zelda|explore|survivor|rogue)/],
+  ["action", /(fight|fighting|punch|brawl|smash|sword|spear|stickman|mortal|combat|beat|slash|kombat|karate)/],
+  ["cards", /(card|poker|blackjack|uno|chess|checkers|board|monopoly|bingo|ludo|domino|mahjong|solitaire)/],
+  ["io", /(\.io\b|-io$|\.io-)/],
+];
+
+function genreFor(game) {
+  const text = `${game.slug || ""} ${game.title || ""}`.toLowerCase();
+  for (const [genre, pattern] of GENRE_RULES) {
+    if (pattern.test(text)) return genre;
+  }
+  return "casual";
+}
+
+function hash32(text) {
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+const WRAPPER_TITLE_RE = /game files|crazygames|cocos creator|\bhtml5\b|\bunity\b/i;
+
+function computeRecs(games, scan, covers) {
+  const now = Date.now();
+  const day = new Date(now).toISOString().slice(0, 10);
+  const scored = [];
+  for (const game of games) {
+    if (!game || typeof game !== "object") continue;
+    if (game.status !== "ok" && game.status !== "partial") continue;
+    if (typeof game.entry !== "string" || game.entry.indexOf("/mirror/") !== 0) continue;
+    const slug = String(game.slug || "");
+    if (!slug) continue;
+    const scanStatus = scan.frozen.get(slug);
+    if (scan.broken.has(slug) || BAD_SCAN.has(scanStatus)) continue;
+
+    let score = game.status === "ok" ? 20 : 6;
+    score += scanStatus === "ok" ? 15 : scanStatus === "slow-boot" ? 10 : 6;
+    score += Math.log2(1 + (playCounts.get(slug) || 0)) * 6;
+    const updated = Date.parse(game.updatedAt || "");
+    if (isFinite(updated)) score += 10 * Math.exp(-Math.max(0, now - updated) / (14 * 864e5));
+    const bytes = Number(game.bytes) || 0;
+    if (bytes > 0 && bytes < 8 * 1024 * 1024) score += 4;
+    if (bytes > 50 * 1024 * 1024) score -= 8;
+    if (!covers.has(slug)) score -= 25;
+    if (WRAPPER_TITLE_RE.test(String(game.title || ""))) score -= 10;
+    score += ((hash32(`${slug}|${day}`) % 100) / 100) * 6;
+    scored.push({ slug, genre: genreFor(game), score });
+  }
+  scored.sort((a, b) => b.score - a.score || a.slug.localeCompare(b.slug));
+
+  const picks = [];
+  const used = new Set();
+  const seenGenre = new Set();
+  for (const item of scored) {
+    if (picks.length >= RECS_COUNT) break;
+    if (used.has(item.slug) || seenGenre.has(item.genre)) continue;
+    picks.push(item.slug);
+    used.add(item.slug);
+    seenGenre.add(item.genre);
+  }
+  for (const item of scored) {
+    if (picks.length >= RECS_COUNT) break;
+    if (used.has(item.slug)) continue;
+    picks.push(item.slug);
+    used.add(item.slug);
+  }
+  return picks;
+}
+
+let catalogCache = { at: 0, mtimeMs: -1, parsed: null };
+async function loadCatalogParsed() {
+  const stat = await fs.stat(CATALOG);
+  if (catalogCache.parsed && catalogCache.mtimeMs === stat.mtimeMs && Date.now() - catalogCache.at < 60 * 1000) {
+    return catalogCache.parsed;
+  }
+  const parsed = JSON.parse(await fs.readFile(CATALOG, "utf8"));
+  catalogCache = { at: Date.now(), mtimeMs: stat.mtimeMs, parsed };
+  return parsed;
+}
+
+let recsCache = { at: 0, key: "", recs: [] };
+async function getRecs(parsed) {
+  const scan = await loadScanState();
+  const covers = await loadCovers();
+  const key = `${catalogCache.mtimeMs}|${scan.at}|${new Date().toISOString().slice(0, 10)}|${playTick}|${playCounts.size}`;
+  if (recsCache.key === key && Date.now() - recsCache.at < 60 * 1000) return recsCache.recs;
+  const recs = computeRecs(parsed.games || [], scan, covers);
+  recsCache = { at: Date.now(), key, recs };
+  return recs;
+}
+
+/* Friendly sign-in gate served to anonymous visitors on /. Logged-in users
+   still get the app; local tooling/test-token requests bypass the gate. */
+const GATE_HTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Z Portal &mdash; sign in</title>
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b1012">
+<style>
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#16323a 0%,#0b1012 55%) #0b1012;color:#e8eef0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px}
+.gate{width:100%;max-width:430px;background:#121a1d;border:1px solid #223136;border-radius:18px;padding:36px 32px;box-shadow:0 24px 60px rgba(0,0,0,.45);text-align:center}
+.mark{width:52px;height:52px;margin:0 auto 18px;border-radius:14px;background:#0d2229;border:1px solid #1e3a42;display:flex;align-items:center;justify-content:center;color:#57d6a4;font-size:26px;font-weight:800}
+h1{margin:0 0 8px;font-size:24px;letter-spacing:.4px}
+.brand{display:block;font-size:12px;letter-spacing:3px;color:#7fe3c0;font-weight:700;margin-bottom:14px}
+p{margin:0 0 24px;color:#9fb2b8;font-size:14.5px}
+.btn{display:block;width:100%;padding:13px 18px;border-radius:11px;background:#2bbd85;color:#04120c;font-weight:700;font-size:15.5px;text-decoration:none;transition:background .15s}
+.btn:hover{background:#3ad096}
+.sub{margin:16px 0 0;font-size:13px;color:#7d9299}
+.sub a{color:#57d6a4}
+.foot{margin-top:26px;font-size:12px;color:#5d7178}
+</style>
+</head>
+<body>
+<main class="gate">
+  <span class="mark" aria-hidden="true">Z</span>
+  <span class="brand">Z PORTAL</span>
+  <h1>Sign in to continue</h1>
+  <p>This space is private to Z Chat. Sign in and everything on the box is ready &mdash; hosted right here.</p>
+  <a class="btn" href="/auth/login?next=%2F">Continue with Z Chat</a>
+  <p class="sub">New to Z Chat? <a href="/auth/login?next=%2F">Create an account</a> &mdash; it takes a few seconds.</p>
+  <p class="foot">No CDNs &middot; no trackers &middot; works offline</p>
+</main>
+</body>
+</html>`;
+
 /* Router */
 
 async function route(req, res) {
@@ -964,6 +1356,9 @@ async function route(req, res) {
     return send(req, res, 400, { "Content-Type": "text/plain; charset=utf-8" }, "Bad request");
   }
 
+  /* PolyTrack multiplayer relay (signaling + leaderboard + shim). */
+  if (pathname === "/polymp" || pathname.startsWith("/polymp/")) return proxyPolymp(req, res);
+
   if (pathname === "/healthz") {
     if (!isRead(method)) return methodNotAllowed(req, res);
     return send(req, res, 200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }, "ok");
@@ -971,21 +1366,37 @@ async function route(req, res) {
 
   if (pathname === "/api/catalog") {
     if (!isRead(method)) return methodNotAllowed(req, res);
-    try {
-      const raw = await fs.readFile(CATALOG, "utf8");
-      return send(req, res, 200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=60" }, raw);
-    } catch (err) {
-      if (err.code === "ENOENT") {
-        return send(
-          req,
-          res,
-          200,
-          { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=60" },
-          '{"games":[]}'
-        );
-      }
-      throw err;
+    /* Library data is for signed-in players only. Trusted-local tooling and
+       the zgtest token are treated as guests so scanners keep working. */
+    if (!requestAuth(req, url)) {
+      return send(
+        req,
+        res,
+        401,
+        { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" },
+        JSON.stringify({ error: "auth_required", login: "/auth/login" })
+      );
     }
+    let parsed;
+    try {
+      parsed = await loadCatalogParsed();
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+      parsed = { games: [] };
+    }
+    let recs = [];
+    try {
+      recs = await getRecs(parsed);
+    } catch {
+      recs = [];
+    }
+    return send(
+      req,
+      res,
+      200,
+      { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "private, max-age=60" },
+      JSON.stringify({ ...parsed, recs })
+    );
   }
 
   if (pathname === "/play" || pathname.startsWith("/play/") || pathname === "/play.html") {
@@ -1003,7 +1414,8 @@ async function route(req, res) {
         ""
       );
     }
-    return sendFile(req, res, path.join(ROOT, "play.html"), "no-cache");
+    notePlay(pathname.startsWith("/play/") ? pathname.slice("/play/".length) : "", req, url);
+    return sendFile(req, res, path.join(ROOT, "play.html"), "no-cache", { "Content-Security-Policy": FRAME_ANCESTORS });
   }
 
   if (pathname === "/api/saves" || pathname.startsWith("/api/saves/")) {
@@ -1065,17 +1477,30 @@ async function route(req, res) {
     return streamFile(req, res, target, "public, max-age=3600");
   }
 
-  if (
-    pathname === "/" ||
-    pathname === "/styles.css" ||
-    pathname === "/app.js" ||
-    pathname === "/save-sync.js" ||
-    pathname === "/index.html"
-  ) {
+  /* Anonymous visitors get only the sign-in gate; the app is served once a
+     verified session exists (local tooling / zgtest bypass via requestAuth). */
+  if (pathname === "/" || pathname === "/index.html") {
     if (!isRead(method)) return methodNotAllowed(req, res);
-    const file = pathname === "/" ? path.join(ROOT, "index.html") : path.join(ROOT, pathname.slice(1));
-    const isolate = file.endsWith(".html") ? ISOLATION_HEADERS : undefined;
-    return sendFile(req, res, file, "no-cache", isolate);
+    if (!requestAuth(req, url)) {
+      return send(
+        req,
+        res,
+        200,
+        {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Content-Security-Policy": FRAME_ANCESTORS,
+          Vary: "Cookie",
+        },
+        GATE_HTML
+      );
+    }
+    return sendFile(req, res, path.join(ROOT, "index.html"), "no-cache", { ...ISOLATION_HEADERS, "Content-Security-Policy": FRAME_ANCESTORS, Vary: "Cookie" });
+  }
+
+  if (pathname === "/styles.css" || pathname === "/app.js" || pathname === "/save-sync.js") {
+    if (!isRead(method)) return methodNotAllowed(req, res);
+    return sendFile(req, res, path.join(ROOT, pathname.slice(1)), "no-cache");
   }
 
   /* Fallback: root-absolute asset requests from mirrored games. Runs last, so
@@ -1113,8 +1538,50 @@ const server = http.createServer((req, res) => {
   });
 });
 
+/* WebSocket upgrade passthrough for the PolyTrack MP relay (/polymp/*). */
+server.on("upgrade", (req, socket, head) => {
+  let pathname = "";
+  try {
+    pathname = new URL(req.url, "http://x").pathname;
+  } catch {
+    socket.destroy();
+    return;
+  }
+  if (!pathname.startsWith("/polymp/")) {
+    socket.destroy();
+    return;
+  }
+  const up = http.request({
+    host: POLYMP_UPSTREAM.hostname,
+    port: POLYMP_UPSTREAM.port,
+    method: req.method,
+    path: req.url,
+    headers: { ...req.headers, host: POLYMP_UPSTREAM.host },
+  });
+  up.on("upgrade", (upRes, upSocket, upHead) => {
+    const lines = [`HTTP/1.1 ${upRes.statusCode || 101} Switching Protocols`];
+    for (const [k, v] of Object.entries(upRes.headers)) lines.push(`${k}: ${v}`);
+    try {
+      socket.write(lines.join("\r\n") + "\r\n\r\n");
+      if (upHead?.length) socket.unshift(upHead);
+      upSocket.pipe(socket).pipe(upSocket);
+    } catch {
+      try {
+        socket.destroy();
+      } catch {}
+    }
+  });
+  up.on("error", () => {
+    try {
+      socket.destroy();
+    } catch {}
+  });
+  up.end();
+});
+
 server.listen(PORT, () => {
   console.log(`[zgames] listening on :${PORT} (root=${ROOT}, mirror=${MIRROR_DIR})`);
+  bootstrapPopularity();
 });
 
 process.on("SIGINT", () => server.close(() => process.exit(0)));

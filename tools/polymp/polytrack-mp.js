@@ -85,6 +85,55 @@
   /* ---- invite links + host start via URL params (CrazyGames shim) ---- */
   var params;
   try { params = new URLSearchParams(location.search); } catch (e) { params = null; }
+
+  /* ---- CrazyGames SDK compatibility -------------------------------------
+     The portal (server.mjs CG_SHIM) and the relay's /game/ harness expose a
+     plain SDK.game object without the multiplayer room methods. The game's
+     startup does `await SDK.init(); SDK.game.addJoinRoomListener(...)`, so the
+     missing method throws and its SDK-based multiplayer wiring is abandoned
+     (console SEVERE) even though the manual host/join UI still works. Add
+     safe fallbacks; a real SDK that already provides them is left untouched. */
+  try {
+    var ensureSdkCompat = function () {
+      try {
+        var sdk = window.CrazyGames && window.CrazyGames.SDK;
+        var game = sdk && sdk.game;
+        if (!game) return false;
+        var noop = function () {};
+        if (typeof game.addJoinRoomListener !== "function") {
+          game.addJoinRoomListener = function (fn) {
+            if (typeof fn !== "function") return;
+            var code = params && (params.get("inviteCode") || params.get("invite"));
+            if (code) {
+              setTimeout(function () { try { fn({ inviteCode: String(code) }); } catch (e) {} }, 0);
+            }
+          };
+        }
+        if (typeof game.removeJoinRoomListener !== "function") game.removeJoinRoomListener = noop;
+        if (typeof game.leftRoom !== "function") game.leftRoom = noop;
+        if (typeof game.updateRoom !== "function") game.updateRoom = noop;
+        if (typeof game.isInstantMultiplayer !== "boolean") game.isInstantMultiplayer = false;
+        /* the game reads SDK.game.settings.muteAudio unguarded once the SDK
+           adapter reaches Ready; a missing settings object throws there. */
+        if (!game.settings || typeof game.settings !== "object") game.settings = {};
+        if (typeof game.settings.muteAudio !== "boolean") game.settings.muteAudio = false;
+        if (typeof game.getMultiplayerInviteCode !== "function") {
+          game.getMultiplayerInviteCode = function () {
+            var code = params && (params.get("inviteCode") || params.get("invite"));
+            return code ? String(code) : null;
+          };
+        }
+        return true;
+      } catch (e) { return false; }
+    };
+    if (!ensureSdkCompat()) {
+      var compatTries = 0;
+      var compatTimer = setInterval(function () {
+        if (ensureSdkCompat() || ++compatTries > 200) clearInterval(compatTimer);
+      }, 50);
+    }
+  } catch (e) { console.warn("[polymp] SDK compat failed", e); }
+
   if (params) {
     var inviteCode = params.get("inviteCode") || params.get("invite") || "";
     var wantHost = params.get("host") === "1" || params.get("host") === "true" || params.get("instantJoin") === "true";
