@@ -1312,7 +1312,7 @@ const GATE_HTML = `<!doctype html>
 html,body{height:100%}
 body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#16323a 0%,#0b1012 55%) #0b1012;color:#e8eef0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px}
 .gate{width:100%;max-width:430px;background:#121a1d;border:1px solid #223136;border-radius:18px;padding:36px 32px;box-shadow:0 24px 60px rgba(0,0,0,.45);text-align:center}
-.mark{width:52px;height:52px;margin:0 auto 18px;border-radius:14px;background:#0d2229;border:1px solid #1e3a42;display:flex;align-items:center;justify-content:center;color:#57d6a4;font-size:26px;font-weight:800}
+.mark{width:52px;height:52px;margin:0 auto 18px;border-radius:14px;display:flex;align-items:center;justify-content:center;overflow:hidden}
 h1{margin:0 0 8px;font-size:24px;letter-spacing:.4px}
 .brand{display:block;font-size:12px;letter-spacing:3px;color:#7fe3c0;font-weight:700;margin-bottom:14px}
 p{margin:0 0 24px;color:#9fb2b8;font-size:14.5px}
@@ -1325,7 +1325,7 @@ p{margin:0 0 24px;color:#9fb2b8;font-size:14.5px}
 </head>
 <body>
 <main class="gate">
-  <span class="mark" aria-hidden="true">Z</span>
+  <span class="mark" aria-hidden="true"><svg viewBox="0 0 512 512" width="52" height="52" role="img" aria-label="Z"><rect x="24" y="24" width="464" height="464" rx="112" fill="#0b0b0d"/><path d="M159 163 H353 V203 L199 303 H353 V343 H159 V303 L313 203 H159 Z" fill="#f4f4f6"/><path d="M313 203 L199 303 L159 303 Z" fill="#2f6bff"/></svg></span>
   <span class="brand">Z PORTAL</span>
   <h1>Sign in to continue</h1>
   <p>This space is private to Z Chat. Sign in and everything on the box is ready &mdash; hosted right here.</p>
