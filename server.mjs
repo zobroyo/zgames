@@ -1325,7 +1325,7 @@ p{margin:0 0 24px;color:#9fb2b8;font-size:14.5px}
 </head>
 <body>
 <main class="gate">
-  <span class="mark" aria-hidden="true"><svg viewBox="0 0 512 512" width="52" height="52" role="img" aria-label="Z"><rect x="24" y="24" width="464" height="464" rx="112" fill="#0b0b0d"/><path d="M159 163 H353 V203 L199 303 H353 V343 H159 V303 L313 203 H159 Z" fill="#f4f4f6"/><path d="M313 203 L199 303 L159 303 Z" fill="#2f6bff"/></svg></span>
+  <span class="mark" aria-hidden="true"><svg viewBox="0 0 512 512" width="56" height="56" role="img" aria-label="Z"><rect x="24" y="24" width="464" height="464" rx="112" fill="#0b0b0d"/><path d="M159 163 H353 V203 L199 303 H353 V343 H159 V303 L313 203 H159 Z" fill="#f4f4f6"/><path d="M313 203 L199 303 L159 303 Z" fill="#49df6e"/></svg></span>
   <span class="brand">Z PORTAL</span>
   <h1>Sign in to continue</h1>
   <p>This space is private to Z Chat. Sign in and everything on the box is ready &mdash; hosted right here.</p>
