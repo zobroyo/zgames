@@ -1306,21 +1306,25 @@ const GATE_HTML = `<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Z Portal &mdash; sign in</title>
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0b1012">
+<meta name="theme-color" content="#0b0b0d">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600&display=swap">
 <style>
 *{box-sizing:border-box}
 html,body{height:100%}
-body{margin:0;background:radial-gradient(1200px 700px at 50% -10%,#16323a 0%,#0b1012 55%) #0b1012;color:#e8eef0;font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px}
-.gate{width:100%;max-width:430px;background:#121a1d;border:1px solid #223136;border-radius:18px;padding:36px 32px;box-shadow:0 24px 60px rgba(0,0,0,.45);text-align:center}
-.mark{width:52px;height:52px;margin:0 auto 18px;border-radius:14px;display:flex;align-items:center;justify-content:center;overflow:hidden}
-h1{margin:0 0 8px;font-size:24px;letter-spacing:.4px}
-.brand{display:block;font-size:12px;letter-spacing:3px;color:#7fe3c0;font-weight:700;margin-bottom:14px}
-p{margin:0 0 24px;color:#9fb2b8;font-size:14.5px}
-.btn{display:block;width:100%;padding:13px 18px;border-radius:11px;background:#2bbd85;color:#04120c;font-weight:700;font-size:15.5px;text-decoration:none;transition:background .15s}
-.btn:hover{background:#3ad096}
-.sub{margin:16px 0 0;font-size:13px;color:#7d9299}
-.sub a{color:#57d6a4}
-.foot{margin-top:26px;font-size:12px;color:#5d7178}
+body{margin:0;background:radial-gradient(1000px 620px at 50% -10%,oklch(0.8 0.2 148 / 10%),transparent 62%),oklch(0.145 0.008 275);color:oklch(0.928 0.004 275);font:16px/1.5 "Inter",ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;padding:24px;-webkit-font-smoothing:antialiased}
+.gate{width:100%;max-width:430px;background:oklch(0.184 0.008 275);border:1px solid oklch(1 0 0 / 9%);border-radius:22px;padding:36px 32px;box-shadow:0 1px 0 0 oklch(1 0 0 / 4%) inset,0 24px 60px -24px oklch(0 0 0 / 80%);text-align:center}
+.mark{width:56px;height:56px;margin:0 auto 18px;border-radius:15px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+h1{margin:0 0 8px;font-size:24px;letter-spacing:-.02em;font-family:"Sora",ui-sans-serif,system-ui,sans-serif}
+.brand{display:block;font-size:11px;letter-spacing:.28em;color:oklch(0.8 0.2 148);font-weight:700;margin-bottom:14px}
+p{margin:0 0 24px;color:oklch(0.66 0.012 275);font-size:14.5px}
+.btn{display:block;width:100%;padding:13px 18px;border-radius:12px;background:oklch(0.8 0.2 148);color:oklch(0.16 0.02 148);font-weight:700;font-size:15px;text-decoration:none;transition:filter .15s,transform .06s;font-family:inherit}
+.btn:hover{filter:brightness(1.06)}
+.btn:active{transform:translateY(1px)}
+.sub{margin:16px 0 0;font-size:13px;color:oklch(0.66 0.012 275)}
+.sub a{color:oklch(0.8 0.2 148);text-decoration:none}
+.foot{margin-top:26px;font-size:12px;color:oklch(0.5 0.012 275)}
 </style>
 </head>
 <body>
@@ -1331,7 +1335,7 @@ p{margin:0 0 24px;color:#9fb2b8;font-size:14.5px}
   <p>This space is private to Z Chat. Sign in and everything on the box is ready &mdash; hosted right here.</p>
   <a class="btn" href="/auth/login?next=%2F">Continue with Z Chat</a>
   <p class="sub">New to Z Chat? <a href="/auth/login?next=%2F">Create an account</a> &mdash; it takes a few seconds.</p>
-  <p class="foot">No CDNs &middot; no trackers &middot; works offline</p>
+  <p class="foot">No trackers &middot; self-hosted &middot; works offline</p>
 </main>
 </body>
 </html>`;
